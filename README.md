@@ -1,4 +1,4 @@
-# Antigravity Strict Engineering Kernel (V4.1 + Steps 2-5.1)
+# Antigravity Strict Engineering Kernel (V4.1 + Steps 2-6S)
 
 A deterministic, risk-adaptive, reality-hardened, and adversarial reliability harness for Google Antigravity on Windows.
 
@@ -13,6 +13,7 @@ NO REAL DEPENDENCY RESTORE → NO DEPENDENCY PASS
 NO REAL BUILD EXECUTION    → NO BUILD PASS
 NO REAL TEST EXECUTION     → NO TEST PASS
 NO REAL RUNTIME STARTUP    → NO RUNTIME PASS
+REAL EXECUTION EVIDENCE > DETERMINISTIC STATIC EVIDENCE > VERIFIER ANALYSIS > BUILDER CLAIM
 ```
 
 It operates through deep Antigravity lifecycle hooks (`PreInvocation`, `PreToolUse`, `Stop`) to enforce strict engineering invariants across every software development lifecycle step.
@@ -46,7 +47,16 @@ flowchart TD
     end
     
     AdvEngines --> CleanEnvFactory
-    CleanEnvFactory --> StopGate[Stop Completion Gate]
+
+    subgraph Step6S [Step 6S Single-Model Blind Verification Gate]
+        BlindAudit[Blind Verifier - Gemini Pro]
+        CXAudit[Counterexample Auditor - Gemini Pro]
+        HiddenChecks[Hidden Verification Suite]
+        EvResolution[Deterministic Evidence Resolution]
+    end
+
+    CleanEnvFactory --> Step6S
+    Step6S --> StopGate[Stop Completion Gate]
     StopGate --> Promotion[Verified Patch Promotion to Canonical]
 ```
 
@@ -62,7 +72,14 @@ flowchart TD
   - **Explicit State Separation:** Clear distinction between `CONFIGURED`, `EXECUTED`, `PASSED`, `NOT_CONFIGURED`, `NOT_APPLICABLE`, and `NOT_EXECUTED`.
   - **Real Subprocess Discovery & Execution:** Subprocess dependency restore (`npm ci` / `pip install -r`), scratch build execution, real test execution, startup crash detection (`STARTUP_CRASH`), smoke journey testing (`JOURNEY_FAILED`), and SQLite migration verification (`MIGRATION_FAILED`).
   - **Non-Destructive Atomic Installer:** Managed block `<!-- STRICT_ENGINEERING_KERNEL_START -->` in `GEMINI.md`, JSON-aware merging in `hooks.json`, safe agent registration, and automated backup/rollback.
-  - **Packaged Antigravity Agents:** Includes canonical definitions for `builder`, `spec-architect`, `test-oracle`, `final-verifier`, `diagnostic-engineer`, `scope-auditor`, and `engineering-orchestrator`.
+  - **Packaged Antigravity Agents:** Includes canonical definitions for `builder`, `spec-architect`, `test-oracle`, `final-verifier`, `diagnostic-engineer`, `scope-auditor`, `engineering-orchestrator`, and `counterexample-auditor`.
+- **Layer 8 (Step 6S Single-Model Blind Verification & Evidence Resolution Gate):**
+  - **No Multi-Model Requirement:** Operates entirely within the Antigravity Gemini ecosystem (Gemini Flash for builder, Gemini Pro for spec architect, scope auditor, test oracle, blind final verifier, and counterexample auditor). Zero reliance on Claude, OpenAI, or external model providers.
+  - **Context Isolation:** Blind Verifier evaluates code with zero access to builder conversation transcripts, commit messages, or self-reported success stories. All candidate code is demarcated within untrusted boundaries.
+  - **Adversarial Counterexample Auditor:** Constructs concrete failing inputs and falsification hypotheses under anchoring defense (zero knowledge of primary verdicts).
+  - **Hidden Verification Engine:** Generates randomized, hidden edge-case checks invisible to the Builder until completion audit; failing checks are automatically promoted to permanent regression tests.
+  - **Deterministic Evidence Resolution:** Eliminates subjective model debates. When auditors disagree, disputes are converted into deterministic sandbox execution tests; real execution unconditionally decides the outcome.
+  - **Truth Hierarchy:** `REAL EXECUTION EVIDENCE > DETERMINISTIC STATIC EVIDENCE > VERIFIER ANALYSIS > BUILDER CLAIM`.
 
 ---
 
@@ -71,16 +88,17 @@ flowchart TD
 ```text
 antigravity-strict-engineering-kernel/
 ├── agents/                             # Packaged Antigravity Subagent Definitions
-│   ├── builder.json
-│   ├── diagnostic_engineer.json
-│   ├── engineering_orchestrator.json
-│   ├── final_verifier.json
-│   ├── scope_auditor.json
-│   ├── spec_architect.json
-│   └── test_oracle.json
+│   ├── builder/agent.md
+│   ├── counterexample-auditor/agent.md
+│   ├── diagnostic-engineer/agent.md
+│   ├── engineering-orchestrator/agent.md
+│   ├── final-verifier/agent.md
+│   ├── scope-auditor/agent.md
+│   ├── spec-architect/agent.md
+│   └── test-oracle/agent.md
 ├── src/strict_engineering/             # Canonical Kernel Source Modules
 │   ├── __init__.py
-│   ├── kernel.py                      # State machine & SHA-256 evidence chain (Schema 5.1.0)
+│   ├── kernel.py                      # State machine & SHA-256 evidence chain (Schema 6S.0)
 │   ├── gate.py                        # Stop gate & PreToolUse security matrix
 │   ├── fingerprint.py                 # Deterministic SHA-256 workspace hashing
 │   ├── baseline.py                    # Workspace health baseline & regression delta
@@ -92,9 +110,15 @@ antigravity-strict-engineering-kernel/
 │   ├── environment_detector.py        # Container, ecosystem & lockfile inspector
 │   ├── environment_factory.py         # Clean scratch environment factory & real subprocess executor
 │   ├── reproducibility.py             # Double-build SHA-256 artifact comparator
+│   ├── blind_verifier.py              # Step 6S Single-model blind verification engine
+│   ├── counterexample_auditor.py      # Step 6S Adversarial counterexample auditor
+│   ├── hidden_verification.py         # Step 6S Hidden verification suite & check promoter
+│   ├── evidence_resolution.py         # Step 6S Deterministic evidence resolution & truth hierarchy
+│   ├── independent_model.py           # Legacy multi-model discovery & runner
+│   ├── disagreement.py                # Legacy multi-model consensus comparator
 │   ├── installer.py                   # Atomic installer & configuration manager
 │   └── reporting.py                   # Multi-schema canonical report generator
-├── tests/                             # Comprehensive Test Suites (209 Tests)
+├── tests/                             # Comprehensive Test Suites
 │   ├── test_suite.py                  # V4 Baseline (12 tests)
 │   ├── test_v41_adversarial.py        # V4.1 Adversarial validation (15 tests)
 │   ├── test_step2_sandbox.py          # Step 2 Worktrees & Promotion (19 tests)
@@ -102,7 +126,8 @@ antigravity-strict-engineering-kernel/
 │   ├── test_step4_adversarial.py      # Step 4 Adversarial Verification (36 tests)
 │   ├── test_step5_clean_env.py        # Step 5 Clean Env & Repro (36 tests)
 │   ├── test_step51_reality_gap.py      # Step 5.1 Reality Gap Hardening (29 tests)
-│   └── test_step6_independent_model.py# Step 6 Verification Contracts (33 tests)
+│   ├── test_step6_independent_model.py# Legacy Step 6 Multi-Model Tests (33 tests)
+│   └── test_step6s_blind_verification.py # Step 6S Blind Verification & Evidence Resolution
 ├── scripts/
 │   ├── install.py                     # Python-native atomic installer
 │   ├── install.ps1                    # PowerShell atomic installer

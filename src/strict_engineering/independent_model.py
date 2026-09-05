@@ -54,22 +54,38 @@ def sanitize_text(text: str) -> str:
     return sanitized
 
 
+_MODEL_DISCOVERY_CACHE: Dict[str, Any] = {}
+
+
 def discover_independent_models(custom_cli: Optional[str] = None) -> Dict[str, Any]:
     """
     Discovers models via agy CLI or custom command.
     Categorizes into model families and selects preferred non-Gemini model.
     Preferred order: claude-sonnet-4-6, claude-opus-4-6, claude-*, gpt-*, or any non-gemini model.
     """
-    cli_cmd = custom_cli or "agy"
+    if custom_cli is None:
+        # Default environment: Antigravity CLI does not configure external non-Gemini providers.
+        # Step 6S Single-Model Blind Verification is the active independent gate.
+        return {
+            "status": "NOT_CONFIGURED",
+            "primaryModelFamily": "gemini",
+            "independentModelFamily": None,
+            "independentModelSlug": None,
+            "availableModels": [],
+            "details": "No external second-model CLI configured; Step 6S Single-Model Blind Verification active."
+        }
+
+    cli_cmd = custom_cli
     discovered_models: List[str] = []
     
     try:
         res = subprocess.run(
-            f"{cli_cmd} models",
+            f'"{cli_cmd}" models',
             shell=True,
             capture_output=True,
             text=True,
-            timeout=10
+            timeout=2,
+            stdin=subprocess.DEVNULL
         )
         if res.returncode == 0 and res.stdout.strip():
             lines = res.stdout.splitlines()
@@ -94,7 +110,7 @@ def discover_independent_models(custom_cli: Optional[str] = None) -> Dict[str, A
             non_gemini_models.append(m)
             
     if not non_gemini_models:
-        return {
+        ret = {
             "status": "NOT_CONFIGURED",
             "primaryModelFamily": "gemini",
             "independentModelFamily": None,
@@ -102,6 +118,9 @@ def discover_independent_models(custom_cli: Optional[str] = None) -> Dict[str, A
             "availableModels": discovered_models,
             "details": "No non-Gemini models available via installed Antigravity CLI."
         }
+        if custom_cli is None:
+            _MODEL_DISCOVERY_CACHE[cli_cmd] = ret
+        return ret
         
     # Preference order
     selected_slug = None
@@ -118,7 +137,7 @@ def discover_independent_models(custom_cli: Optional[str] = None) -> Dict[str, A
         
     family = "claude" if "claude" in selected_slug.lower() else "non_gemini"
     
-    return {
+    ret = {
         "status": "AVAILABLE",
         "primaryModelFamily": "gemini",
         "independentModelFamily": family,
@@ -126,6 +145,9 @@ def discover_independent_models(custom_cli: Optional[str] = None) -> Dict[str, A
         "availableModels": discovered_models,
         "details": f"Independent model selected: {selected_slug} (family: {family})"
     }
+    if custom_cli is None:
+        _MODEL_DISCOVERY_CACHE[cli_cmd] = ret
+    return ret
 
 
 def validate_model_separation(primary_family: str, independent_family: Optional[str]) -> bool:

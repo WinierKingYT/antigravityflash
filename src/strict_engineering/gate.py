@@ -22,6 +22,10 @@ try:
     from . import reproducibility
     from . import independent_model
     from . import disagreement
+    from . import blind_verifier
+    from . import counterexample_auditor
+    from . import hidden_verification
+    from . import evidence_resolution
 except (ImportError, ValueError):
     import kernel
     import fingerprint
@@ -32,6 +36,10 @@ except (ImportError, ValueError):
     import reproducibility
     import independent_model
     import disagreement
+    import blind_verifier
+    import counterexample_auditor
+    import hidden_verification
+    import evidence_resolution
 
 PROTECTED_ARTIFACTS = {
     ".agent-harness/original-request.md",
@@ -43,6 +51,10 @@ PROTECTED_ARTIFACTS = {
     "docs/ACCEPTANCE_TESTS.md",
     ".agent-harness/independent-audit.json",
     ".agent-harness/disagreements.json",
+    ".agent-harness/blind-verification.json",
+    ".agent-harness/counterexample-audit.json",
+    ".agent-harness/hidden-checks.json",
+    ".agent-harness/evidence-resolutions.json",
 }
 
 # Shell write commands matching PowerShell, cmd, Python inline, and file manipulation tools
@@ -331,43 +343,125 @@ def evaluate_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
         elif state.get("cleanEnvRequired", False):
             unresolved_gates.append("Clean environment verification record (.agent-harness/environment-verification.json) does not exist")
 
-    # 8d. STEP 6: Independent Model Verification & Disagreement Gate
-    ind_audit_file = kernel.get_harness_dir(workspace) / "independent-audit.json"
-    critical_reqs = [
-        r["id"] for r in reqs
-        if r.get("risk", {}).get("level") == "CRITICAL"
-        or r.get("riskLevel") == "CRITICAL"
-        or "INDEPENDENT_MODEL_AUDIT" in r.get("verificationPolicy", {}).get("requiredChecks", [])
-    ]
-    has_critical_req = len(critical_reqs) > 0
-    
-    ind_audit_mandatory = state.get("independentAuditRequired", False)
-    if ind_audit_file.exists() or ind_audit_mandatory:
-        if ind_audit_file.exists():
-            try:
-                with open(ind_audit_file, "r", encoding="utf-8") as f:
-                    ind_audit = json.load(f)
-                    
-                if ind_audit.get("status") not in {"COMPLETED"}:
-                    unresolved_gates.append(f"Independent model audit not completed (status: '{ind_audit.get('status')}')")
-                elif ind_audit.get("overallVerdict") != "PASS":
-                    unresolved_gates.append(f"Independent model audit failed (overallVerdict: '{ind_audit.get('overallVerdict')}')")
-                    
-                target_rids = critical_reqs if critical_reqs else [r["id"] for r in reqs]
-                p_verdicts = {r["id"]: r.get("status", "UNVERIFIED") for r in reqs}
-                comp = disagreement.compare_verdicts(p_verdicts, ind_audit, target_requirement_ids=target_rids)
-                if comp.get("overallConsensus") == "DISAGREEMENT":
-                    dis_count = comp.get("disagreementCount", 0)
-                    unresolved_gates.append(f"Disagreement Gate blocked: {dis_count} unresolved disagreement(s) between primary and independent auditor")
-            except Exception:
-                unresolved_gates.append("Could not parse independent-audit.json")
+    # 8d. STEP 6 & 6S: Independent Model Verification / Single-Model Blind Verification Gate
+    v_mode = state.get("verificationMode")
+    if not v_mode:
+        if state.get("blindAuditRequired"):
+            v_mode = "SINGLE_MODEL_BLIND"
+        elif state.get("independentAuditRequired"):
+            v_mode = "MULTI_MODEL"
         else:
-            ind_disc = independent_model.discover_independent_models()
-            if ind_disc.get("status") == "NOT_CONFIGURED":
-                if has_critical_req:
-                    unresolved_gates.append("Independent model audit is MANDATORY for CRITICAL requirements, but INDEPENDENT_MODEL is NOT_CONFIGURED via CLI")
+            v_mode = "SINGLE_MODEL_BLIND"
+
+    ind_audit_mandatory = bool(state.get("independentAuditRequired", False) or state.get("blindAuditRequired", False))
+
+    if v_mode == "SINGLE_MODEL_BLIND":
+        blind_file = kernel.get_harness_dir(workspace) / "blind-verification.json"
+        cx_file = kernel.get_harness_dir(workspace) / "counterexample-audit.json"
+        hidden_file = kernel.get_harness_dir(workspace) / "hidden-checks.json"
+        res_file = kernel.get_harness_dir(workspace) / "evidence-resolutions.json"
+
+        # Check Blind Verification
+        if blind_file.exists() or ind_audit_mandatory:
+            if blind_file.exists():
+                try:
+                    with open(blind_file, "r", encoding="utf-8") as f:
+                        blind_audit = json.load(f)
+                    if blind_audit.get("status") != "COMPLETED":
+                        unresolved_gates.append(f"Blind verification audit not completed (status: '{blind_audit.get('status')}')")
+                    elif blind_audit.get("overallVerdict") != "PASS":
+                        unresolved_gates.append(f"Blind verification audit failed (overallVerdict: '{blind_audit.get('overallVerdict')}')")
+                    fresh, fresh_reason = blind_verifier.is_audit_fresh(workspace, blind_audit)
+                    if not fresh:
+                        unresolved_gates.append(f"Blind verification audit record is STALE: {fresh_reason}")
+                except Exception:
+                    unresolved_gates.append("Could not parse blind-verification.json")
             else:
-                unresolved_gates.append("Independent model audit record (.agent-harness/independent-audit.json) does not exist")
+                unresolved_gates.append("Blind verification record (.agent-harness/blind-verification.json) does not exist")
+
+        # Check Counterexample Audit
+        if cx_file.exists() or ind_audit_mandatory:
+            if cx_file.exists():
+                try:
+                    with open(cx_file, "r", encoding="utf-8") as f:
+                        cx_data = json.load(f)
+                    if cx_data.get("status") != "COMPLETED":
+                        unresolved_gates.append(f"Counterexample audit not completed (status: '{cx_data.get('status')}')")
+                    elif cx_data.get("overallVerdict") == "COUNTEREXAMPLE_FOUND":
+                        unresolved_cxs = [
+                            cx for cx in cx_data.get("counterexamples", [])
+                            if not cx.get("resolved", False)
+                        ]
+                        if unresolved_cxs:
+                            unresolved_gates.append(f"Counterexample Audit Gate blocked: {len(unresolved_cxs)} unresolved counterexample(s) found by auditor")
+                except Exception:
+                    unresolved_gates.append("Could not parse counterexample-audit.json")
+            elif ind_audit_mandatory:
+                unresolved_gates.append("Counterexample audit record (.agent-harness/counterexample-audit.json) does not exist")
+
+        # Check Hidden Verification
+        if hidden_file.exists() or ind_audit_mandatory:
+            if hidden_file.exists():
+                try:
+                    with open(hidden_file, "r", encoding="utf-8") as f:
+                        hidden_data = json.load(f)
+                    if hidden_data.get("overallStatus") != "PASS":
+                        failed_count = hidden_data.get("failedChecks", 0)
+                        unresolved_gates.append(f"Hidden Verification Gate blocked: {failed_count} hidden check(s) failed (status: '{hidden_data.get('overallStatus')}')")
+                except Exception:
+                    unresolved_gates.append("Could not parse hidden-checks.json")
+            elif ind_audit_mandatory:
+                unresolved_gates.append("Hidden verification record (.agent-harness/hidden-checks.json) does not exist")
+
+        # Check Evidence Resolution cycle tracking
+        if res_file.exists():
+            try:
+                with open(res_file, "r", encoding="utf-8") as f:
+                    res_data = json.load(f)
+                cycles = res_data.get("cycles", {})
+                for cid, cinfo in cycles.items():
+                    if cinfo.get("status") in {"BLOCKED", "ESCALATED_BLOCKED"}:
+                        unresolved_gates.append(f"Evidence Resolution Gate blocked on {cid}: max resolution cycles exceeded without empirical convergence")
+            except Exception:
+                unresolved_gates.append("Could not parse evidence-resolutions.json")
+
+    else:
+        # Legacy MULTI_MODEL mode
+        ind_audit_file = kernel.get_harness_dir(workspace) / "independent-audit.json"
+        critical_reqs = [
+            r["id"] for r in reqs
+            if r.get("risk", {}).get("level") == "CRITICAL"
+            or r.get("riskLevel") == "CRITICAL"
+            or "INDEPENDENT_MODEL_AUDIT" in r.get("verificationPolicy", {}).get("requiredChecks", [])
+        ]
+        has_critical_req = len(critical_reqs) > 0
+
+        if ind_audit_file.exists() or ind_audit_mandatory:
+            if ind_audit_file.exists():
+                try:
+                    with open(ind_audit_file, "r", encoding="utf-8") as f:
+                        ind_audit = json.load(f)
+                        
+                    if ind_audit.get("status") not in {"COMPLETED"}:
+                        unresolved_gates.append(f"Independent model audit not completed (status: '{ind_audit.get('status')}')")
+                    elif ind_audit.get("overallVerdict") != "PASS":
+                        unresolved_gates.append(f"Independent model audit failed (overallVerdict: '{ind_audit.get('overallVerdict')}')")
+                        
+                    target_rids = critical_reqs if critical_reqs else [r["id"] for r in reqs]
+                    p_verdicts = {r["id"]: r.get("status", "UNVERIFIED") for r in reqs}
+                    comp = disagreement.compare_verdicts(p_verdicts, ind_audit, target_requirement_ids=target_rids)
+                    if comp.get("overallConsensus") == "DISAGREEMENT":
+                        dis_count = comp.get("disagreementCount", 0)
+                        unresolved_gates.append(f"Disagreement Gate blocked: {dis_count} unresolved disagreement(s) between primary and independent auditor")
+                except Exception:
+                    unresolved_gates.append("Could not parse independent-audit.json")
+            else:
+                ind_disc = independent_model.discover_independent_models()
+                if ind_disc.get("status") == "NOT_CONFIGURED":
+                    if has_critical_req:
+                        unresolved_gates.append("Independent model audit is MANDATORY for CRITICAL requirements, but INDEPENDENT_MODEL is NOT_CONFIGURED via CLI")
+                else:
+                    unresolved_gates.append("Independent model audit record (.agent-harness/independent-audit.json) does not exist")
 
     # 9. STEP 2: Sandbox Promotion Check
     if state.get("sandboxActive", False):

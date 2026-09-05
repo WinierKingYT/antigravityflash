@@ -17,6 +17,10 @@ try:
     from . import reproducibility
     from . import independent_model
     from . import disagreement
+    from . import blind_verifier
+    from . import counterexample_auditor
+    from . import hidden_verification
+    from . import evidence_resolution
 except (ImportError, ValueError):
     import kernel
     import risk_engine
@@ -24,6 +28,10 @@ except (ImportError, ValueError):
     import reproducibility
     import independent_model
     import disagreement
+    import blind_verifier
+    import counterexample_auditor
+    import hidden_verification
+    import evidence_resolution
 
 POLICY_SCHEMA_VERSION = "3.0.0"
 
@@ -39,6 +47,9 @@ CHECK_TYPES = [
     "CLEAN_ENVIRONMENT",
     "REPRODUCIBILITY",
     "INDEPENDENT_MODEL_AUDIT",
+    "BLIND_AUDIT",
+    "COUNTEREXAMPLE_AUDIT",
+    "HIDDEN_VERIFICATION",
 ]
 
 
@@ -76,18 +87,34 @@ def detect_project_capabilities(workspace_dir: Path) -> Dict[str, Any]:
     # Discover independent model availability and workspace configuration
     state_file = workspace_path / ".agent-harness" / "state.json"
     independent_audit_req = False
+    verification_mode = "SINGLE_MODEL_BLIND"
     if state_file.exists():
         try:
             with open(state_file, "r", encoding="utf-8") as f:
                 s_data = json.load(f)
-                independent_audit_req = bool(s_data.get("independentAuditRequired", False))
+                independent_audit_req = bool(s_data.get("independentAuditRequired", False) or s_data.get("blindAuditRequired", False))
+                if "verificationMode" in s_data:
+                    verification_mode = s_data["verificationMode"]
+                elif s_data.get("blindAuditRequired"):
+                    verification_mode = "SINGLE_MODEL_BLIND"
+                elif s_data.get("independentAuditRequired"):
+                    verification_mode = "MULTI_MODEL"
+                else:
+                    verification_mode = "SINGLE_MODEL_BLIND"
         except Exception:
             pass
 
-    ind_disc = independent_model.discover_independent_models()
-    has_independent_model = ind_disc.get("status") == "AVAILABLE" or independent_audit_req
+    has_independent_model = False
+    independent_model_slug = None
+    if verification_mode == "MULTI_MODEL":
+        ind_disc = independent_model.discover_independent_models()
+        has_independent_model = ind_disc.get("status") == "AVAILABLE" or independent_audit_req
+        independent_model_slug = ind_disc.get("independentModelSlug")
+    elif independent_audit_req:
+        has_independent_model = True
 
     return {
+        "verificationMode": verification_mode,
         "independentAuditRequired": independent_audit_req,
         "hasTypecheck": has_typecheck,
         "hasBuild": has_build,
@@ -96,7 +123,7 @@ def detect_project_capabilities(workspace_dir: Path) -> Dict[str, Any]:
         "isWebUi": is_web_ui,
         "isCli": not is_web_ui,
         "hasIndependentModel": has_independent_model,
-        "independentModelSlug": ind_disc.get("independentModelSlug"),
+        "independentModelSlug": independent_model_slug,
     }
 
 
@@ -105,7 +132,7 @@ def compile_verification_policy(
 ) -> Dict[str, Any]:
     """
     Compile deterministic verification policy for a requirement based on risk level
-    and requirement characteristics.
+    and requirement characteristics. Supports SINGLE_MODEL_BLIND (Step 6S) and MULTI_MODEL.
     """
     risk_info = req.get("risk", {})
     risk_level = risk_info.get("level", "LOW").upper()
@@ -127,61 +154,113 @@ def compile_verification_policy(
     is_dep_change = "dependency" in all_text or "package" in all_text or "toolchain" in all_text
     is_migration = "migration" in all_text or "schema" in all_text or "database" in all_text
     is_repro = "reproducib" in all_text or "double-build" in all_text
-    is_ind_audit_flagged = "independent" in all_text or req.get("independentAuditRequired", False)
+    is_ind_audit_flagged = "independent" in all_text or req.get("independentAuditRequired", False) or req.get("blindAuditRequired", False)
+
+    v_mode = (capabilities and capabilities.get("verificationMode")) or "SINGLE_MODEL_BLIND"
 
     is_ind_audit_enabled = (
         bool(capabilities and capabilities.get("hasIndependentModel"))
         or bool(capabilities and capabilities.get("independentAuditRequired"))
+        or bool(capabilities and capabilities.get("blindAuditRequired"))
         or bool(req.get("independentAuditRequired"))
+        or bool(req.get("blindAuditRequired"))
         or is_ind_audit_flagged
     )
 
-    if risk_level == "LOW":
-        # Low risk: static check + single automated behavioral check
-        pass
-    elif risk_level == "MEDIUM":
-        required_checks.append("RUNTIME_OBSERVATION")
-        applicable_checks.append("RUNTIME_OBSERVATION")
-        if is_persistence:
-            required_checks.append("RESTART_PERSISTENCE")
-            applicable_checks.append("RESTART_PERSISTENCE")
-        if is_ind_audit_enabled and is_ind_audit_flagged:
-            required_checks.append("INDEPENDENT_MODEL_AUDIT")
-            applicable_checks.append("INDEPENDENT_MODEL_AUDIT")
-    elif risk_level == "HIGH":
-        required_checks.extend(["RUNTIME_OBSERVATION", "NEGATIVE_PATH", "POST_PROMOTION"])
-        applicable_checks.extend(["RUNTIME_OBSERVATION", "NEGATIVE_PATH", "POST_PROMOTION"])
-        if is_persistence:
-            required_checks.append("RESTART_PERSISTENCE")
-            applicable_checks.append("RESTART_PERSISTENCE")
-        if is_untrusted_input or is_auth:
-            if "NEGATIVE_PATH" not in required_checks:
-                required_checks.append("NEGATIVE_PATH")
-        if is_ind_audit_enabled and (is_auth or is_destructive or is_ind_audit_flagged):
-            required_checks.append("INDEPENDENT_MODEL_AUDIT")
-            applicable_checks.append("INDEPENDENT_MODEL_AUDIT")
-    elif risk_level == "CRITICAL":
-        required_checks.extend([
-            "RUNTIME_OBSERVATION",
-            "NEGATIVE_PATH",
-            "CLEAN_ROOM_AUDIT",
-            "POST_PROMOTION",
-        ])
-        if is_ind_audit_enabled:
-            required_checks.append("INDEPENDENT_MODEL_AUDIT")
-        applicable_checks.extend([
-            "RUNTIME_OBSERVATION",
-            "NEGATIVE_PATH",
-            "CLEAN_ROOM_AUDIT",
-            "POST_PROMOTION",
-            "INDEPENDENT_MODEL_AUDIT",
-        ])
-        if is_persistence:
-            required_checks.append("RESTART_PERSISTENCE")
-            applicable_checks.append("RESTART_PERSISTENCE")
-        if is_destructive or "BACKUP_RESTORE" in risk_info.get("reasonCodes", []):
-            required_checks.append("RECOVERY_OBSERVATION")
-            applicable_checks.append("RECOVERY_OBSERVATION")
+    if v_mode == "SINGLE_MODEL_BLIND":
+        # Step 6S Single-Model Blind Verification Policy
+        if risk_level == "LOW":
+            pass
+        elif risk_level == "MEDIUM":
+            required_checks.append("RUNTIME_OBSERVATION")
+            applicable_checks.append("RUNTIME_OBSERVATION")
+            if is_persistence:
+                required_checks.append("RESTART_PERSISTENCE")
+                applicable_checks.append("RESTART_PERSISTENCE")
+            if is_ind_audit_enabled and is_ind_audit_flagged:
+                required_checks.extend(["BLIND_AUDIT", "HIDDEN_VERIFICATION"])
+                applicable_checks.extend(["BLIND_AUDIT", "HIDDEN_VERIFICATION"])
+        elif risk_level == "HIGH":
+            required_checks.extend(["RUNTIME_OBSERVATION", "NEGATIVE_PATH", "POST_PROMOTION"])
+            applicable_checks.extend(["RUNTIME_OBSERVATION", "NEGATIVE_PATH", "POST_PROMOTION"])
+            if is_persistence:
+                required_checks.append("RESTART_PERSISTENCE")
+                applicable_checks.append("RESTART_PERSISTENCE")
+            if is_untrusted_input or is_auth:
+                if "NEGATIVE_PATH" not in required_checks:
+                    required_checks.append("NEGATIVE_PATH")
+            if is_ind_audit_enabled:
+                required_checks.extend(["BLIND_AUDIT", "COUNTEREXAMPLE_AUDIT", "HIDDEN_VERIFICATION"])
+                applicable_checks.extend(["BLIND_AUDIT", "COUNTEREXAMPLE_AUDIT", "HIDDEN_VERIFICATION"])
+        elif risk_level == "CRITICAL":
+            required_checks.extend([
+                "RUNTIME_OBSERVATION",
+                "NEGATIVE_PATH",
+                "CLEAN_ROOM_AUDIT",
+                "POST_PROMOTION",
+            ])
+            applicable_checks.extend([
+                "RUNTIME_OBSERVATION",
+                "NEGATIVE_PATH",
+                "CLEAN_ROOM_AUDIT",
+                "POST_PROMOTION",
+            ])
+            if is_ind_audit_enabled:
+                required_checks.extend(["BLIND_AUDIT", "COUNTEREXAMPLE_AUDIT", "HIDDEN_VERIFICATION"])
+                applicable_checks.extend(["BLIND_AUDIT", "COUNTEREXAMPLE_AUDIT", "HIDDEN_VERIFICATION"])
+            if is_persistence:
+                required_checks.append("RESTART_PERSISTENCE")
+                applicable_checks.append("RESTART_PERSISTENCE")
+            if is_destructive or "BACKUP_RESTORE" in risk_info.get("reasonCodes", []):
+                required_checks.append("RECOVERY_OBSERVATION")
+                applicable_checks.append("RECOVERY_OBSERVATION")
+    else:
+        # Multi-model mode (retained optionally)
+        if risk_level == "LOW":
+            pass
+        elif risk_level == "MEDIUM":
+            required_checks.append("RUNTIME_OBSERVATION")
+            applicable_checks.append("RUNTIME_OBSERVATION")
+            if is_persistence:
+                required_checks.append("RESTART_PERSISTENCE")
+                applicable_checks.append("RESTART_PERSISTENCE")
+            if is_ind_audit_enabled and is_ind_audit_flagged:
+                required_checks.append("INDEPENDENT_MODEL_AUDIT")
+                applicable_checks.append("INDEPENDENT_MODEL_AUDIT")
+        elif risk_level == "HIGH":
+            required_checks.extend(["RUNTIME_OBSERVATION", "NEGATIVE_PATH", "POST_PROMOTION"])
+            applicable_checks.extend(["RUNTIME_OBSERVATION", "NEGATIVE_PATH", "POST_PROMOTION"])
+            if is_persistence:
+                required_checks.append("RESTART_PERSISTENCE")
+                applicable_checks.append("RESTART_PERSISTENCE")
+            if is_untrusted_input or is_auth:
+                if "NEGATIVE_PATH" not in required_checks:
+                    required_checks.append("NEGATIVE_PATH")
+            if is_ind_audit_enabled and (is_auth or is_destructive or is_ind_audit_flagged):
+                required_checks.append("INDEPENDENT_MODEL_AUDIT")
+                applicable_checks.append("INDEPENDENT_MODEL_AUDIT")
+        elif risk_level == "CRITICAL":
+            required_checks.extend([
+                "RUNTIME_OBSERVATION",
+                "NEGATIVE_PATH",
+                "CLEAN_ROOM_AUDIT",
+                "POST_PROMOTION",
+            ])
+            if is_ind_audit_enabled:
+                required_checks.append("INDEPENDENT_MODEL_AUDIT")
+            applicable_checks.extend([
+                "RUNTIME_OBSERVATION",
+                "NEGATIVE_PATH",
+                "CLEAN_ROOM_AUDIT",
+                "POST_PROMOTION",
+                "INDEPENDENT_MODEL_AUDIT",
+            ])
+            if is_persistence:
+                required_checks.append("RESTART_PERSISTENCE")
+                applicable_checks.append("RESTART_PERSISTENCE")
+            if is_destructive or "BACKUP_RESTORE" in risk_info.get("reasonCodes", []):
+                required_checks.append("RECOVERY_OBSERVATION")
+                applicable_checks.append("RECOVERY_OBSERVATION")
 
     # Step 5 Clean Environment & Reproducibility integration
     if is_dep_change or is_migration:
@@ -298,13 +377,33 @@ def audit_verification_policy(workspace_dir: Path) -> Tuple[bool, List[str], Dic
     clean_env_passed = env_state is not None and env_state.get("status") == "CLEAN_ENVIRONMENT_PASS"
     reproducibility_passed = env_state is not None and env_state.get("reproducibility", {}).get("status") in {"REPRODUCIBILITY_PASS", "IDENTICAL", "EXPECTED_NONDETERMINISM"}
 
-    # Independent audit state
+    # Step 6 Multi-model audit state (backwards compatibility)
     ind_audit = independent_model.load_audit_record(workspace_path)
     ind_passed_reqs = set()
     if ind_audit and ind_audit.get("status") == "COMPLETED" and ind_audit.get("overallVerdict") == "PASS":
         for r in ind_audit.get("requirements", []):
             if r.get("verdict") == "PASS":
                 ind_passed_reqs.add(r.get("id"))
+
+    # Step 6S Blind Final Verifier state
+    blind_audit = blind_verifier.load_blind_audit_record(workspace_path)
+    blind_passed_reqs = set()
+    if blind_audit and blind_audit.get("status") == "COMPLETED" and blind_audit.get("overallVerdict") == "PASS":
+        for r in blind_audit.get("requirements", []):
+            if r.get("verdict") == "PASS":
+                blind_passed_reqs.add(r.get("id"))
+
+    # Step 6S Counterexample Auditor state
+    cx_audit = counterexample_auditor.load_counterexample_record(workspace_path)
+    cx_passed = (
+        cx_audit is not None
+        and cx_audit.get("status") == "COMPLETED"
+        and (cx_audit.get("verdict") == "NO_COUNTEREXAMPLE_FOUND" or len(cx_audit.get("counterexamples", [])) == 0)
+    )
+
+    # Step 6S Hidden Verification state
+    hidden_rec = hidden_verification.load_hidden_verification_record(workspace_path)
+    hidden_passed = hidden_rec is not None and hidden_rec.get("overallStatus") == "PASS"
 
     for req_id, policy in policies.items():
         risk_lvl = policy.get("riskLevel", "LOW")
@@ -318,9 +417,10 @@ def audit_verification_policy(workspace_dir: Path) -> Tuple[bool, List[str], Dic
                 cmd = ev.get("commandOrInteraction", "").upper()
                 v_type = ev.get("verificationType", "").upper()
                 
-                if v_type in {"AUTOMATED_TEST", "EXECUTED_COMMAND"}:
+                if v_type in {"AUTOMATED_TEST", "EXECUTED_COMMAND", "TEST"}:
                     completed.add("STATIC")
                     completed.add("AUTOMATED_TEST")
+                    completed.add("TEST")
                 if v_type == "RUNTIME_OBSERVATION" or "RUNTIME" in cmd:
                     completed.add("RUNTIME_OBSERVATION")
                 if "NEGATIVE" in cmd or "INVALID" in cmd or "UNAUTHORIZED" in cmd:
@@ -329,7 +429,7 @@ def audit_verification_policy(workspace_dir: Path) -> Tuple[bool, List[str], Dic
                     completed.add("RESTART_PERSISTENCE")
                 if "RECOVERY" in cmd or "CONFIRM" in cmd or "RESTORE" in cmd:
                     completed.add("RECOVERY_OBSERVATION")
-                if ev.get("verifierIdentity") == "final-verifier" or "CLEAN_ROOM" in cmd:
+                if ev.get("verifierIdentity") in {"final-verifier", "clean-room-auditor"} or "CLEAN_ROOM" in cmd:
                     completed.add("CLEAN_ROOM_AUDIT")
                 if "POST_PROMOTION" in cmd or "PROMOT" in cmd or v_type == "POST_PROMOTION":
                     completed.add("POST_PROMOTION")
@@ -339,6 +439,17 @@ def audit_verification_policy(workspace_dir: Path) -> Tuple[bool, List[str], Dic
                     completed.add("REPRODUCIBILITY")
                 if "INDEPENDENT" in cmd or v_type == "INDEPENDENT_MODEL_AUDIT":
                     completed.add("INDEPENDENT_MODEL_AUDIT")
+                if v_type == "BLIND_AUDIT" or "BLIND" in cmd:
+                    completed.add("BLIND_AUDIT")
+                    completed.add("CLEAN_ROOM_AUDIT")
+                    completed.add("INDEPENDENT_MODEL_AUDIT")
+                if v_type == "COUNTEREXAMPLE_AUDIT" or "COUNTEREXAMPLE" in cmd or "CX_" in cmd:
+                    completed.add("COUNTEREXAMPLE_AUDIT")
+                    completed.add("NEGATIVE_PATH")
+                if v_type == "HIDDEN_VERIFICATION" or "HIDDEN" in cmd:
+                    completed.add("HIDDEN_VERIFICATION")
+                    completed.add("POST_PROMOTION")
+                    completed.add("NEGATIVE_PATH")
 
         if clean_env_passed:
             completed.add("CLEAN_ENVIRONMENT")
@@ -346,6 +457,17 @@ def audit_verification_policy(workspace_dir: Path) -> Tuple[bool, List[str], Dic
             completed.add("REPRODUCIBILITY")
         if req_id in ind_passed_reqs:
             completed.add("INDEPENDENT_MODEL_AUDIT")
+        if req_id in blind_passed_reqs:
+            completed.add("BLIND_AUDIT")
+            completed.add("CLEAN_ROOM_AUDIT")
+            completed.add("INDEPENDENT_MODEL_AUDIT")
+        if cx_passed:
+            completed.add("COUNTEREXAMPLE_AUDIT")
+            completed.add("NEGATIVE_PATH")
+        if hidden_passed:
+            completed.add("HIDDEN_VERIFICATION")
+            completed.add("POST_PROMOTION")
+            completed.add("NEGATIVE_PATH")
 
         missing = required - completed
         policy["completedChecks"] = sorted(list(completed & required))

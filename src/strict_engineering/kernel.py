@@ -8,8 +8,10 @@ import os
 import re
 import sys
 import json
+import time
 import hashlib
 import datetime
+import subprocess
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Set
 
@@ -47,6 +49,15 @@ VALID_VERIFICATION_TYPES = {
     "DATABASE_BOOTSTRAP",
     "MIGRATION",
     "REPRODUCIBILITY_RUN",
+    "BLIND_AUDIT",
+    "COUNTEREXAMPLE_AUDIT",
+    "HIDDEN_VERIFICATION",
+}
+
+ANALYTICAL_EVIDENCE_TYPES = {
+    "BLIND_AUDIT",
+    "COUNTEREXAMPLE_AUDIT",
+    "HIDDEN_VERIFICATION",
 }
 
 INVALID_PASS_TYPES = {
@@ -332,6 +343,8 @@ def compute_evidence_event_hash(entry: Dict[str, Any]) -> str:
         str(entry.get("artifactReference", "")),
         str(entry.get("workspaceFingerprint", "")),
         str(entry.get("verifierIdentity", "")),
+        str(entry.get("origin", "")),
+        json.dumps(entry.get("executionDetails", {}), sort_keys=True) if entry.get("executionDetails") else "",
     ]
     payload = "|".join(fields).encode("utf-8")
     return hashlib.sha256(payload).hexdigest()
@@ -394,6 +407,106 @@ def verify_evidence_chain(workspace_dir: Path) -> Tuple[bool, str]:
         return False, f"Error reading evidence chain: {e}"
 
 
+def validate_execution_claim(entry: Dict[str, Any]) -> Tuple[bool, str]:
+    """
+    Validates execution claim provenance (Sections 34, 37, S6S-T1).
+    Rejects manual claims claiming REAL_PROJECT_EXECUTION without trusted runner details.
+    """
+    origin = entry.get("origin", "")
+    if origin == "REAL_PROJECT_EXECUTION":
+        details = entry.get("executionDetails")
+        if not details or not isinstance(details, dict):
+            return False, "UNTRUSTED_EXECUTION_CLAIM: origin 'REAL_PROJECT_EXECUTION' missing executionDetails proof"
+        if details.get("exitCode") is None or not details.get("stdoutHash"):
+            return False, "UNTRUSTED_EXECUTION_CLAIM: incomplete executionDetails proof"
+        if entry.get("result") == "PASS" and details.get("exitCode") != 0:
+            return False, "UNTRUSTED_EXECUTION_CLAIM: execution exitCode != 0 cannot be PASS"
+    elif origin in {"MODEL_CLAIM", "MOCK"}:
+        if entry.get("result") == "PASS":
+            return False, f"UNTRUSTED_EXECUTION_CLAIM: origin '{origin}' cannot produce PASS"
+    return True, "Execution claim is valid"
+
+
+def record_trusted_execution(
+    workspace_dir: Path,
+    requirement_ids: List[str],
+    command: str,
+    execution_type: str = "TEST",
+    cwd: Optional[Path] = None,
+    timeout_sec: int = 60,
+    verifier_identity: str = "trusted-execution-runner",
+) -> Dict[str, Any]:
+    """
+    Authoritative deterministic execution runner (Sections 36, S6S-T2).
+    Executes real subprocess, captures exitCode, duration, stdoutHash, stderrHash,
+    and writes cryptographically bound execution evidence.
+    """
+    ws = Path(workspace_dir).resolve()
+    run_cwd = Path(cwd).resolve() if cwd else ws
+    start_time = time.time()
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(run_cwd),
+            capture_output=True,
+            text=True,
+            timeout=timeout_sec,
+        )
+        duration_ms = int((time.time() - start_time) * 1000)
+        stdout_hash = hashlib.sha256(proc.stdout.encode("utf-8")).hexdigest()
+        stderr_hash = hashlib.sha256(proc.stderr.encode("utf-8")).hexdigest()
+        exit_code = proc.returncode
+        result = "PASS" if exit_code == 0 else "FAIL"
+        output = proc.stdout if exit_code == 0 else (proc.stderr or proc.stdout)
+    except subprocess.TimeoutExpired:
+        duration_ms = int((time.time() - start_time) * 1000)
+        stdout_hash = hashlib.sha256(b"").hexdigest()
+        stderr_hash = hashlib.sha256(b"TIMEOUT").hexdigest()
+        exit_code = 124
+        result = "FAIL"
+        output = f"Execution timed out after {timeout_sec}s"
+    except Exception as e:
+        duration_ms = int((time.time() - start_time) * 1000)
+        stdout_hash = hashlib.sha256(b"").hexdigest()
+        stderr_hash = hashlib.sha256(str(e).encode("utf-8")).hexdigest()
+        exit_code = 1
+        result = "FAIL"
+        output = f"Execution failed: {str(e)}"
+
+    exec_record = {
+        "executionType": execution_type,
+        "exitCode": exit_code,
+        "durationMs": duration_ms,
+        "stdoutHash": stdout_hash,
+        "stderrHash": stderr_hash,
+    }
+
+    ev_id = record_evidence(
+        workspace_dir=ws,
+        requirement_ids=requirement_ids,
+        verification_type=execution_type,
+        command_or_interaction=command,
+        result=result,
+        relevant_output=output[:2000],
+        verifier_identity=verifier_identity,
+        origin="REAL_PROJECT_EXECUTION",
+        execution_record=exec_record,
+    )
+
+    return {
+        "evidenceId": ev_id,
+        "requirementIds": requirement_ids,
+        "command": command,
+        "result": result,
+        "exitCode": exit_code,
+        "durationMs": duration_ms,
+        "stdoutHash": stdout_hash,
+        "stderrHash": stderr_hash,
+        "output": output,
+    }
+
+
 def record_evidence(
     workspace_dir: Path,
     requirement_ids: List[str],
@@ -405,12 +518,16 @@ def record_evidence(
     artifact_reference: Optional[str] = None,
     origin: str = "LIVE_KERNEL_EXECUTION",
     execution_record: Optional[Dict[str, Any]] = None,
+    require_trusted_record: bool = False,
 ) -> str:
     """
     Append verification evidence to evidence.jsonl in a tamper-evident SHA-256 hash chain
     and update requirement statuses.
-    Enforces that CLAIM / MOCK cannot produce PASS and Builder cannot self-certify PASS.
+    Enforces that CLAIM / MOCK cannot produce PASS, Builder cannot self-certify PASS,
+    and untrusted claims claiming REAL_PROJECT_EXECUTION are rejected.
     """
+    if require_trusted_record and origin == "REAL_PROJECT_EXECUTION" and not execution_record:
+        raise ValueError("UNTRUSTED_EXECUTION_CLAIM: origin 'REAL_PROJECT_EXECUTION' requires a verified execution_record.")
     workspace_path = Path(workspace_dir).resolve()
     harness_dir = get_harness_dir(workspace_path)
     ev_file = harness_dir / "evidence.jsonl"
@@ -542,12 +659,16 @@ def is_execution_backed_pass(
     if not matching_evidence:
         return False, f"No PASS evidence recorded for {req_id}"
 
-    # Filter by origin and verification type
-    valid_exec_ev = [
-        ev for ev in matching_evidence
-        if ev.get("origin") in {"REAL_PROJECT_EXECUTION", "LIVE_KERNEL_EXECUTION", "USER_ACCEPTANCE"}
-        and ev.get("verificationType") not in INVALID_PASS_TYPES
-    ]
+    # Filter by origin and verification type (exclude analytical evidence and untrusted claims)
+    valid_exec_ev = []
+    for ev in matching_evidence:
+        v_orig = ev.get("origin")
+        v_type = ev.get("verificationType")
+        if v_orig in {"REAL_PROJECT_EXECUTION", "LIVE_KERNEL_EXECUTION", "USER_ACCEPTANCE"}:
+            if v_type not in INVALID_PASS_TYPES and v_type not in ANALYTICAL_EVIDENCE_TYPES:
+                is_valid_claim, _ = validate_execution_claim(ev)
+                if is_valid_claim:
+                    valid_exec_ev.append(ev)
 
     if not valid_exec_ev:
         return False, f"All PASS evidence for {req_id} lacks acceptable execution origin (claims/mocks rejected)"

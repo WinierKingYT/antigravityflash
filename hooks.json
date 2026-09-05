@@ -1,0 +1,30 @@
+{
+  "strict-engineering": {
+    "PreToolUse": [
+      {
+        "matcher": "write_to_file|replace_file_content|multi_replace_file_content|run_command",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python C:\\Users\\ahmet\\.gemini\\config\\strict-engineering\\hooks_handler.py pre-tool",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreInvocation": [
+      {
+        "type": "command",
+        "command": "python C:\\Users\\ahmet\\.gemini\\config\\strict-engineering\\hooks_handler.py pre-invocation",
+        "timeout": 10
+      }
+    ],
+    "Stop": [
+      {
+        "type": "command",
+        "command": "python C:\\Users\\ahmet\\.gemini\\config\\strict-engineering\\hooks_handler.py stop",
+        "timeout": 30
+      }
+    ]
+  }
+}

@@ -1,10 +1,11 @@
 """
-Strict Engineering Kernel V4.1 - Core State & Lifecycle Engine
+Strict Engineering Kernel V5.1 - Core State, Lifecycle & Execution Evidence Engine
 Manages project harness, immutable original request, requirement ledger,
-tamper-evident SHA-256 evidence chain, phase transitions, and single-writer state mutations.
+tamper-evident SHA-256 evidence chain, execution provenance, and single-writer state mutations.
 """
 
 import os
+import re
 import sys
 import json
 import hashlib
@@ -36,6 +37,16 @@ VALID_VERIFICATION_TYPES = {
     "RUNTIME_OBSERVATION",
     "BROWSER_OBSERVATION",
     "MANUAL_USER_ACCEPTANCE",
+    "REAL_PROJECT_EXECUTION",
+    "DEPENDENCY_RESTORE",
+    "BUILD",
+    "TEST",
+    "RUNTIME_START",
+    "HEALTH_CHECK",
+    "USER_JOURNEY",
+    "DATABASE_BOOTSTRAP",
+    "MIGRATION",
+    "REPRODUCIBILITY_RUN",
 }
 
 INVALID_PASS_TYPES = {
@@ -43,7 +54,38 @@ INVALID_PASS_TYPES = {
     "UNVERIFIED",
     "ASSUMPTION",
     "MODEL_CONFIDENCE",
+    "MOCK",
+    "MODEL_CLAIM",
 }
+
+VALID_EXECUTION_TYPES = {
+    "DEPENDENCY_RESTORE",
+    "BUILD",
+    "TEST",
+    "RUNTIME_START",
+    "HEALTH_CHECK",
+    "USER_JOURNEY",
+    "DATABASE_BOOTSTRAP",
+    "MIGRATION",
+    "REPRODUCIBILITY_RUN",
+}
+
+VALID_ORIGINS = {
+    "REAL_PROJECT_EXECUTION",
+    "LIVE_KERNEL_EXECUTION",
+    "SIMULATED_INTEGRATION",
+    "KERNEL_UNIT_TEST",
+    "MOCK",
+    "MODEL_CLAIM",
+    "USER_ACCEPTANCE",
+}
+
+SECRET_SCRUB_PATTERNS = [
+    re.compile(r'(?i)(api[_-]?key|secret|token|password|auth|bearer)\s*[:=]\s*["\']?([a-zA-Z0-9_\-\.]{8,})["\']?'),
+    re.compile(r'(?i)(bearer\s+)([a-zA-Z0-9_\-\.]{12,})'),
+    re.compile(r'(?i)(ghp_[a-zA-Z0-9]{20,}|gho_[a-zA-Z0-9]{20,}|github_pat_[a-zA-Z0-9_]{22,})'),
+    re.compile(r'(?i)(sk-[a-zA-Z0-9]{20,})'),
+]
 
 PHASES = [
     "DISCOVERY",
@@ -60,6 +102,16 @@ PHASES = [
 
 def utc_now_iso() -> str:
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
+
+
+def scrub_secrets(text: Optional[str]) -> str:
+    """Scrub sensitive secrets (API keys, tokens, passwords) from strings."""
+    if not text:
+        return ""
+    scrubbed = str(text)
+    for pat in SECRET_SCRUB_PATTERNS:
+        scrubbed = pat.sub(r"\1 [REDACTED_SECRET]", scrubbed)
+    return scrubbed
 
 
 def get_harness_dir(workspace_dir: Path) -> Path:
@@ -118,112 +170,86 @@ def initialize_harness(
 
     # 1. Immutable Original Request & SHA-256
     orig_req_file = harness_dir / "original-request.md"
-    orig_sha_file = harness_dir / "original-request.sha256"
-
-    cleaned_intent = original_intent.strip()
+    orig_req_sha_file = harness_dir / "original-request.sha256"
+    
     with open(orig_req_file, "w", encoding="utf-8") as f:
-        f.write(cleaned_intent + "\n")
+        f.write(original_intent.strip() + "\n")
+    
+    orig_sha = hashlib.sha256(original_intent.strip().encode("utf-8")).hexdigest()
+    with open(orig_req_sha_file, "w", encoding="utf-8") as f:
+        f.write(orig_sha + "\n")
 
-    intent_sha256 = hashlib.sha256(cleaned_intent.encode("utf-8")).hexdigest()
-    with open(orig_sha_file, "w", encoding="utf-8") as f:
-        f.write(intent_sha256 + "\n")
-
-    # 2. Requirements & Coverage Ledger
-    reqs_file = harness_dir / "requirements.json"
-    if not reqs_file.exists():
-        with open(reqs_file, "w", encoding="utf-8") as f:
-            json.dump([], f, indent=2)
-
-    cov_file = harness_dir / "coverage.json"
-    if not cov_file.exists():
-        with open(cov_file, "w", encoding="utf-8") as f:
-            json.dump(
-                {
-                    "statements": [],
-                    "coveragePercent": 0,
-                    "uncoveredStatements": [],
-                    "complete": False,
-                },
-                f,
-                indent=2,
-            )
-
-    dep_file = harness_dir / "dependency-map.json"
-    if not dep_file.exists():
-        with open(dep_file, "w", encoding="utf-8") as f:
-            json.dump({}, f, indent=2)
-
-    # 3. Evidence & Change logs
-    ev_file = harness_dir / "evidence.jsonl"
-    if not ev_file.exists():
-        ev_file.touch()
-
-    ch_file = harness_dir / "changes.jsonl"
-    if not ch_file.exists():
-        ch_file.touch()
-
-    # 4. Baseline
-    base_file = harness_dir / "baseline.json"
-    base_data = baseline.capture_project_baseline(
-        workspace_path,
-        test_command=test_command,
-        build_command=build_command,
-        lint_command=lint_command,
-        typecheck_command=typecheck_command,
-    )
-    with open(base_file, "w", encoding="utf-8") as f:
-        json.dump(base_data, f, indent=2)
-
-    # 5. Documentation Templates
+    # 2. Baseline Document Templates
     doc_templates = {
-        "PRODUCT_SPEC.md": "# Product Specification\n\n## Original Intent Reference\nSee `.agent-harness/original-request.md`\n\n## Requirements\nDetailed requirements extracted by Spec Architect.\n",
-        "ACCEPTANCE_TESTS.md": "# Acceptance Contracts\n\nBehavioral test contracts defined by Test Oracle prior to implementation.\n",
-        "ARCHITECTURE.md": "# Architecture & Technical Design\n\nSystem overview, invariants, and component boundaries.\n",
-        "IMPLEMENTATION_PLAN.md": "# Implementation Plan\n\nBounded vertical implementation slices.\n",
-        "DECISIONS.md": "# Decision & Change Control Log\n\nAll requirement adjustments and architectural decisions recorded here.\n",
-        "IMPLEMENTATION_STATUS.md": "# Implementation & Verification Status\n\nSummary of requirement states and verification evidence.\n",
+        "PRODUCT_SPEC.md": f"# Product Specification\n\n## Original User Intent\n\n{original_intent.strip()}\n\n## Atomic Requirements Ledger\n*(To be populated and locked by spec-architect)*\n",
+        "ACCEPTANCE_TESTS.md": "# Acceptance Test Contracts\n\n*(Immutable acceptance criteria and test oracle contracts)*\n",
+        "IMPLEMENTATION_PLAN.md": "# Dependency-Aware Implementation Plan\n\n*(Implementation plan with topological ordering)*\n",
+        "IMPLEMENTATION_STATUS.md": "# Live Implementation Status\n\n- Current Phase: SPECIFICATION\n- Spec Locked: false\n- Acceptance Locked: false\n",
+        "DECISIONS.md": "# Architecture Decision Records (ADRs)\n\n*(Log of authorized architectural and requirement changes)*\n",
+        "ARCHITECTURE.md": "# Architecture & Component Overview\n\n*(Component topology and dependency mappings)*\n",
     }
-
     for doc_name, content in doc_templates.items():
         doc_path = docs_dir / doc_name
         if not doc_path.exists():
             with open(doc_path, "w", encoding="utf-8") as f:
                 f.write(content)
 
-    # 6. State Machine
-    state = {
+    # 3. Initial Baseline Capture
+    bl = baseline.capture_workspace_baseline(
+        workspace_path,
+        test_command=test_command,
+        build_command=build_command,
+        lint_command=lint_command,
+        typecheck_command=typecheck_command,
+    )
+
+    # 4. Initialize State
+    initial_state = {
         "active": True,
-        "version": "4.1.0",
+        "schemaVersion": "5.1.0",
         "phase": "SPECIFICATION",
         "specLocked": False,
         "acceptanceLocked": False,
-        "verificationFresh": True,
+        "originalRequestSha256": orig_sha,
+        "workspaceFingerprint": bl.get("initialFingerprint"),
+        "activeTask": None,
+        "builderSubagentActive": False,
         "finalAuditPassed": False,
-        "originalRequestSha256": intent_sha256,
-        "attemptCounters": {},
         "createdAt": utc_now_iso(),
         "updatedAt": utc_now_iso(),
     }
-    save_state(workspace_path, state)
-    return state
+    save_state(workspace_path, initial_state)
+
+    # 5. Empty Requirements, Coverage, Evidence Chain, Changes, Dependency Map
+    save_requirements(workspace_path, [])
+    
+    with open(harness_dir / "coverage.json", "w", encoding="utf-8") as f:
+        json.dump({"complete": False, "coveragePercent": 0, "uncoveredStatements": [original_intent.strip()]}, f, indent=2)
+    
+    open(harness_dir / "evidence.jsonl", "w", encoding="utf-8").close()
+    open(harness_dir / "changes.jsonl", "w", encoding="utf-8").close()
+    
+    with open(harness_dir / "dependency-map.json", "w", encoding="utf-8") as f:
+        json.dump({"version": "5.1.0", "dependencies": {}}, f, indent=2)
+
+    return initial_state
 
 
 def verify_original_intent_integrity(workspace_dir: Path) -> bool:
-    """Verify that original-request.md has not been modified."""
+    """Verify that original-request.md matches original-request.sha256."""
     harness_dir = get_harness_dir(workspace_dir)
-    orig_req_file = harness_dir / "original-request.md"
-    orig_sha_file = harness_dir / "original-request.sha256"
+    req_file = harness_dir / "original-request.md"
+    sha_file = harness_dir / "original-request.sha256"
 
-    if not orig_req_file.exists() or not orig_sha_file.exists():
+    if not req_file.exists() or not sha_file.exists():
         return False
 
-    with open(orig_sha_file, "r", encoding="utf-8") as f:
+    with open(req_file, "r", encoding="utf-8") as f:
+        content = f.read().strip()
+    with open(sha_file, "r", encoding="utf-8") as f:
         expected_sha = f.read().strip()
 
-    with open(orig_req_file, "r", encoding="utf-8") as f:
-        actual_content = f.read().strip()
-
-    actual_sha = hashlib.sha256(actual_content.encode("utf-8")).hexdigest()
+    actual_sha = hashlib.sha256(content.encode("utf-8")).hexdigest()
     return actual_sha == expected_sha
 
 
@@ -231,8 +257,11 @@ def load_requirements(workspace_dir: Path) -> List[Dict[str, Any]]:
     req_file = get_harness_dir(workspace_dir) / "requirements.json"
     if not req_file.exists():
         return []
-    with open(req_file, "r", encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(req_file, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
 
 
 def save_requirements(workspace_dir: Path, requirements: List[Dict[str, Any]]) -> None:
@@ -374,11 +403,13 @@ def record_evidence(
     relevant_output: str,
     verifier_identity: str,
     artifact_reference: Optional[str] = None,
+    origin: str = "LIVE_KERNEL_EXECUTION",
+    execution_record: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Append verification evidence to evidence.jsonl in a tamper-evident SHA-256 hash chain
     and update requirement statuses.
-    Enforces that CLAIM cannot produce PASS and Builder cannot self-certify PASS.
+    Enforces that CLAIM / MOCK cannot produce PASS and Builder cannot self-certify PASS.
     """
     workspace_path = Path(workspace_dir).resolve()
     harness_dir = get_harness_dir(workspace_path)
@@ -390,9 +421,17 @@ def record_evidence(
     prev_hash = get_last_evidence_hash(workspace_path)
     ev_id = f"EV-{hashlib.sha256((utc_now_iso() + command_or_interaction + prev_hash).encode()).hexdigest()[:8].upper()}"
 
+    # Scrub secrets from command and output
+    clean_command = scrub_secrets(command_or_interaction)
+    clean_output = scrub_secrets(relevant_output)
+
     # Enforce evidence validity
     norm_result = result.upper()
-    is_claim = verification_type.upper() in INVALID_PASS_TYPES or verification_type.upper() not in VALID_VERIFICATION_TYPES
+    is_claim = (
+        verification_type.upper() in INVALID_PASS_TYPES
+        or verification_type.upper() not in VALID_VERIFICATION_TYPES
+        or origin.upper() in {"MOCK", "MODEL_CLAIM"}
+    )
     is_builder = verifier_identity.lower() == "builder"
 
     entry: Dict[str, Any] = {
@@ -400,14 +439,24 @@ def record_evidence(
         "timestamp": utc_now_iso(),
         "requirementIds": requirement_ids,
         "verificationType": verification_type,
-        "commandOrInteraction": command_or_interaction,
+        "commandOrInteraction": clean_command,
         "result": norm_result,
-        "relevantOutput": relevant_output[:2000] if relevant_output else "",
+        "relevantOutput": clean_output[:2000] if clean_output else "",
         "artifactReference": artifact_reference or "",
         "workspaceFingerprint": curr_fp,
         "verifierIdentity": verifier_identity,
+        "origin": origin,
         "previousHash": prev_hash,
     }
+
+    if execution_record:
+        entry["executionDetails"] = {
+            "executionType": execution_record.get("executionType"),
+            "exitCode": execution_record.get("exitCode"),
+            "durationMs": execution_record.get("durationMs"),
+            "stdoutHash": execution_record.get("stdoutHash"),
+            "stderrHash": execution_record.get("stderrHash"),
+        }
 
     event_hash = compute_evidence_event_hash(entry)
     entry["eventHash"] = event_hash
@@ -421,7 +470,7 @@ def record_evidence(
     # Determine requirement status update
     if norm_result == "PASS":
         if is_claim or is_builder:
-            # CLAIM or Builder cannot produce PASS! Transition to IMPLEMENTED_UNVERIFIED
+            # CLAIM, MOCK, or Builder cannot produce PASS! Transition to IMPLEMENTED_UNVERIFIED
             for r_id in requirement_ids:
                 r_obj = req_map.get(r_id, {})
                 affected = r_obj.get("affectedPaths", [])
@@ -458,7 +507,7 @@ def record_evidence(
                     subset_fingerprint_hash=subset_fp,
                     verification_id=ev_id,
                 )
-    else:
+    elif norm_result == "FAIL":
         for r_id in requirement_ids:
             update_requirement_status(
                 workspace_path,
@@ -472,122 +521,239 @@ def record_evidence(
     return ev_id
 
 
-def record_change(
+def is_execution_backed_pass(
+    req: Dict[str, Any],
+    evidence_events: List[Dict[str, Any]],
     workspace_dir: Path,
-    requirement_ids: List[str],
-    old_behavior: str,
-    new_behavior: str,
-    reason: str,
-    source_of_change: str,  # USER_REQUESTED_CHANGE / ARCHITECTURAL_DECISION
-) -> str:
+) -> Tuple[bool, str]:
     """
-    Record change control entry into changes.jsonl, append to docs/DECISIONS.md,
-    and invalidate affected requirements to STALE.
+    Deterministic Pass Eligibility Function.
+    Evaluates whether requirement has real, execution-backed, fresh PASS evidence.
     """
-    workspace_path = Path(workspace_dir).resolve()
-    harness_dir = get_harness_dir(workspace_path)
-    ch_file = harness_dir / "changes.jsonl"
-    decisions_file = workspace_path / "docs" / "DECISIONS.md"
+    req_id = req.get("id")
+    if req.get("status") != "PASS":
+        return False, f"Requirement status is '{req.get('status')}', not 'PASS'"
 
-    change_id = f"CHG-{hashlib.sha256((utc_now_iso() + reason).encode()).hexdigest()[:8].upper()}"
+    matching_evidence = [
+        ev for ev in evidence_events
+        if req_id in ev.get("requirementIds", []) and ev.get("result") == "PASS"
+    ]
 
-    entry = {
-        "changeId": change_id,
-        "timestamp": utc_now_iso(),
-        "requirementIds": requirement_ids,
-        "oldBehavior": old_behavior,
-        "newBehavior": new_behavior,
-        "reason": reason,
-        "sourceOfChange": source_of_change,
-    }
+    if not matching_evidence:
+        return False, f"No PASS evidence recorded for {req_id}"
 
-    with open(ch_file, "a", encoding="utf-8") as f:
-        f.write(json.dumps(entry) + "\n")
+    # Filter by origin and verification type
+    valid_exec_ev = [
+        ev for ev in matching_evidence
+        if ev.get("origin") in {"REAL_PROJECT_EXECUTION", "LIVE_KERNEL_EXECUTION", "USER_ACCEPTANCE"}
+        and ev.get("verificationType") not in INVALID_PASS_TYPES
+    ]
 
-    if decisions_file.exists():
-        md_entry = (
-            f"\n### [{change_id}] - {utc_now_iso()}\n"
-            f"- **Requirements:** {', '.join(requirement_ids)}\n"
-            f"- **Source:** {source_of_change}\n"
-            f"- **Reason:** {reason}\n"
-            f"- **Old Behavior:** {old_behavior}\n"
-            f"- **New Behavior:** {new_behavior}\n"
-        )
-        with open(decisions_file, "a", encoding="utf-8") as f:
-            f.write(md_entry)
+    if not valid_exec_ev:
+        return False, f"All PASS evidence for {req_id} lacks acceptable execution origin (claims/mocks rejected)"
 
-    # Invalidate affected requirements to STALE
-    for r_id in requirement_ids:
-        update_requirement_status(
-            workspace_path,
-            req_id=r_id,
-            new_status="STALE",
-            verifier_identity="change_control_manager",
-        )
+    # Check freshness against current workspace fingerprint
+    file_hashes = fingerprint.get_workspace_file_hashes(workspace_dir)
+    curr_fp = fingerprint.compute_workspace_fingerprint(workspace_dir, file_hashes)
+    
+    last_verified_fp = req.get("lastVerifiedFingerprint")
+    if last_verified_fp and last_verified_fp != curr_fp:
+        # Check if subset fingerprint matches (for path-isolated changes)
+        affected = req.get("affectedPaths", [])
+        if affected:
+            curr_subset = fingerprint.compute_path_subset_fingerprint(file_hashes, affected)
+            if curr_subset != req.get("lastVerifiedSubsetFingerprint"):
+                return False, f"Evidence for {req_id} is STALE (affected source files modified after verification)"
+        else:
+            return False, f"Evidence for {req_id} is STALE (workspace modified after verification)"
 
-    return change_id
+    return True, "Requirement has verified, fresh, execution-backed PASS evidence"
 
 
 def check_and_invalidate_stale(workspace_dir: Path) -> List[str]:
     """
-    Scan workspace and invalidate PASS requirements whose dependent source files have changed.
+    Check all PASS requirements and invalidate to STALE if affected files have been modified.
+    Returns list of invalidated requirement IDs.
     """
     workspace_path = Path(workspace_dir).resolve()
     reqs = load_requirements(workspace_path)
-    dep_map_file = get_harness_dir(workspace_path) / "dependency-map.json"
-    dep_map = {}
-    if dep_map_file.exists():
-        try:
-            with open(dep_map_file, "r", encoding="utf-8") as f:
-                dep_map = json.load(f)
-        except Exception:
-            dep_map = {}
+    if not reqs:
+        return []
 
     file_hashes = fingerprint.get_workspace_file_hashes(workspace_path)
-    stale_ids = fingerprint.find_stale_requirements(workspace_path, reqs, dep_map, file_hashes)
+    curr_fp = fingerprint.compute_workspace_fingerprint(workspace_path, file_hashes)
 
-    if stale_ids:
-        for r_id in stale_ids:
-            update_requirement_status(
-                workspace_path,
-                req_id=r_id,
-                new_status="STALE",
-                verifier_identity="kernel_freshness_monitor",
-            )
-    return stale_ids
+    dep_map = {}
+    dep_file = workspace_path / ".agent-harness" / "dependency-map.json"
+    if dep_file.exists():
+        try:
+            dep_map = json.loads(dep_file.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+
+    invalidated: List[str] = []
+    for req in reqs:
+        if req.get("status") == "PASS":
+            rid = req.get("id")
+            last_fp = req.get("lastVerifiedFingerprint")
+            affected = req.get("affectedPaths", []) or dep_map.get(rid, [])
+            
+            is_stale = False
+            if affected:
+                curr_sub = fingerprint.compute_path_subset_fingerprint(file_hashes, affected)
+                last_sub = req.get("lastVerifiedSubsetFingerprint")
+                if last_sub is None or curr_sub != last_sub:
+                    is_stale = True
+            elif last_fp:
+                if last_fp != curr_fp:
+                    is_stale = True
+            else:
+                # If no last_fp recorded, mark stale on workspace modification
+                is_stale = True
+
+            if is_stale:
+                req["status"] = "STALE"
+                req["updatedAt"] = utc_now_iso()
+                invalidated.append(rid)
+
+    if invalidated:
+        save_requirements(workspace_path, reqs)
+        # Record change event
+        record_change(
+            workspace_path,
+            change_description=f"Source modification detected: invalidated requirements {invalidated} to STALE",
+            rationale="Automatic fingerprint invalidation post-verification",
+            affected_requirements=invalidated,
+        )
+
+    return invalidated
+
+
+def record_change(
+    workspace_dir: Path,
+    *args,
+    **kwargs,
+) -> str:
+    """
+    Log an authorized change to changes.jsonl and docs/DECISIONS.md.
+    Invalidates affected requirements to STALE.
+    Supports all legacy and v5.1 calling patterns:
+    - record_change(ws, change_description, rationale, affected_requirements)
+    - record_change(ws, requirement_ids, old_behavior, new_behavior, reason, source_of_change)
+    - record_change(workspace_dir=ws, requirement_ids=[...], old_behavior=..., new_behavior=..., reason=..., source_of_change=...)
+    """
+    workspace_path = Path(workspace_dir).resolve()
+    harness_dir = get_harness_dir(workspace_path)
+    changes_file = harness_dir / "changes.jsonl"
+    decisions_file = workspace_path / "docs" / "DECISIONS.md"
+
+    requirement_ids = kwargs.get("requirement_ids") or kwargs.get("affected_requirements") or []
+    old_behavior = kwargs.get("old_behavior", "")
+    new_behavior = kwargs.get("new_behavior", "")
+    reason = kwargs.get("reason") or kwargs.get("rationale", "")
+    source_of_change = kwargs.get("source_of_change") or kwargs.get("actor", "AUTHOR")
+    description = kwargs.get("description") or kwargs.get("change_description", "")
+
+    if args:
+        if len(args) == 1 and isinstance(args[0], (list, set)):
+            requirement_ids = list(args[0])
+        elif len(args) >= 3 and isinstance(args[0], str) and isinstance(args[2], (list, set)):
+            description = args[0]
+            reason = args[1]
+            requirement_ids = list(args[2])
+        elif len(args) >= 1 and isinstance(args[0], (list, set)):
+            requirement_ids = list(args[0])
+            if len(args) >= 2:
+                old_behavior = str(args[1])
+            if len(args) >= 3:
+                new_behavior = str(args[2])
+            if len(args) >= 4:
+                reason = str(args[3])
+            if len(args) >= 5:
+                source_of_change = str(args[4])
+        elif len(args) == 3:
+            description = str(args[0])
+            reason = str(args[1])
+            if isinstance(args[2], (list, set)):
+                requirement_ids = list(args[2])
+            else:
+                requirement_ids = [str(args[2])]
+
+    if not description:
+        if old_behavior and new_behavior:
+            description = f"Changed from '{old_behavior}' to '{new_behavior}'"
+        elif requirement_ids:
+            description = f"Modified requirements: {', '.join(requirement_ids)}"
+        else:
+            description = f"Change recorded: {reason}"
+
+    if not reason:
+        reason = "Specification update or risk escalation"
+
+    change_id = f"CHG-{hashlib.sha256((utc_now_iso() + description).encode()).hexdigest()[:8].upper()}"
+    entry = {
+        "changeId": change_id,
+        "timestamp": utc_now_iso(),
+        "description": description,
+        "rationale": reason,
+        "reason": reason,
+        "oldBehavior": old_behavior,
+        "newBehavior": new_behavior,
+        "affectedRequirements": requirement_ids,
+        "requirementIds": requirement_ids,
+        "sourceOfChange": source_of_change,
+    }
+
+    with open(changes_file, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry) + "\n")
+
+    decisions_file.parent.mkdir(parents=True, exist_ok=True)
+    adr_entry = f"\n## [{change_id}] {description}\n- **Date:** {utc_now_iso()}\n- **Rationale:** {reason}\n- **Affected Requirements:** {', '.join(requirement_ids)}\n"
+    with open(decisions_file, "a", encoding="utf-8") as f:
+        f.write(adr_entry)
+
+    # Invalidate affected requirements to STALE
+    reqs = load_requirements(workspace_path)
+    for req in reqs:
+        if req.get("id") in requirement_ids and req.get("status") == "PASS":
+            req["status"] = "STALE"
+            req["updatedAt"] = utc_now_iso()
+    save_requirements(workspace_path, reqs)
+
+    return change_id
+
 
 
 def scan_for_placeholders(workspace_dir: Path) -> List[Dict[str, Any]]:
-    """
-    Scan application production code for unfinished placeholders.
-    """
+    """Scan workspace files for unfinished placeholders (TODO, FIXME, pass, etc.)."""
     workspace_path = Path(workspace_dir).resolve()
-    findings = []
-    forbidden_tokens = ["TODO", "FIXME", "placeholder", "dummy", "fake data", "coming soon", "not implemented"]
-
-    # Ignored directories for placeholder check
-    ignore_dirs = {".git", ".agent-harness", "node_modules", "dist", "build", "tests", "test", "docs"}
+    placeholders = []
+    
+    # Patterns indicating unfinished logic
+    patterns = [
+        re.compile(r'\b(TODO|FIXME|XXX|TBD|PLACEHOLDER)\b', re.IGNORECASE),
+        re.compile(r'raise NotImplementedError'),
+    ]
 
     for root, dirs, files in os.walk(workspace_path):
-        dirs[:] = [d for d in dirs if d not in ignore_dirs and not d.startswith(".agent-")]
+        # Skip harness, docs, tests, and ignored dirs
+        dirs[:] = [d for d in dirs if d not in {".git", ".agent-harness", "docs", "tests", "venv", ".venv", "node_modules", "__pycache__", "target", "dist", "build"}]
+        
         for f in files:
-            ext = os.path.splitext(f)[1].lower()
-            if ext in {".py", ".ts", ".js", ".tsx", ".jsx", ".go", ".rs", ".java", ".c", ".cpp", ".dart"}:
-                fpath = Path(root) / f
-                rel_path = fpath.relative_to(workspace_path)
+            if f.endswith((".py", ".ts", ".js", ".rs", ".go")):
+                fp = Path(root) / f
                 try:
-                    with open(fpath, "r", encoding="utf-8", errors="ignore") as file_obj:
-                        for line_num, line in enumerate(file_obj, 1):
-                            line_lower = line.lower()
-                            for token in forbidden_tokens:
-                                if token.lower() in line_lower:
-                                    findings.append({
-                                        "file": str(rel_path).replace("\\", "/"),
-                                        "line": line_num,
-                                        "token": token,
-                                        "snippet": line.strip()[:100],
+                    with open(fp, "r", encoding="utf-8", errors="ignore") as f_in:
+                        for line_no, line in enumerate(f_in, 1):
+                            for pat in patterns:
+                                if pat.search(line):
+                                    rel_path = str(fp.relative_to(workspace_path)).replace("\\", "/")
+                                    placeholders.append({
+                                        "file": rel_path,
+                                        "line": line_no,
+                                        "content": line.strip(),
                                     })
+                                    break
                 except Exception:
                     pass
-
-    return findings
+    return placeholders

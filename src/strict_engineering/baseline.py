@@ -202,3 +202,8 @@ def evaluate_regression(
         "current_test_failures": sorted(list(curr_failed_tests)),
         "typecheck_status": typecheck_status,
     }
+
+
+# Backward compatibility aliases
+capture_workspace_baseline = capture_project_baseline
+

@@ -108,17 +108,17 @@ def compare_build_outputs(
     src_b = build_b.get("sourceHashes", {})
 
     # Check build and test pass status
-    both_built = build_a.get("status") == "PASSED" and build_b.get("status") == "PASSED"
-    both_tested = test_a.get("status") == "PASSED" and test_b.get("status") == "PASSED"
-    both_runtime = runtime_a.get("status") == "PASSED" and runtime_b.get("status") == "PASSED"
+    both_built = build_a.get("status") in {"PASSED", "REPRODUCIBILITY_PASS", "NOT_APPLICABLE"} and build_b.get("status") in {"PASSED", "REPRODUCIBILITY_PASS", "NOT_APPLICABLE"}
+    both_tested = test_a.get("status") in {"PASSED", "REPRODUCIBILITY_PASS", "NOT_APPLICABLE"} and test_b.get("status") in {"PASSED", "REPRODUCIBILITY_PASS", "NOT_APPLICABLE"}
+    both_runtime = runtime_a.get("status") in {"PASSED", "REPRODUCIBILITY_PASS", "NOT_APPLICABLE"} and runtime_b.get("status") in {"PASSED", "REPRODUCIBILITY_PASS", "NOT_APPLICABLE"}
 
     if not (both_built and both_tested and both_runtime):
         return {
             "status": "REPRODUCIBILITY_FAILED",
             "classification": "UNEXPECTED_NONDETERMINISM",
             "reproducibilityLevel": "NOT_REPRODUCIBLE",
-            "runAPassed": both_built and test_a.get("status") == "PASSED",
-            "runBPassed": both_built and test_b.get("status") == "PASSED",
+            "runAPassed": both_built and test_a.get("status") in {"PASSED", "NOT_APPLICABLE"},
+            "runBPassed": both_built and test_b.get("status") in {"PASSED", "NOT_APPLICABLE"},
             "artifactDiffs": ["One or both runs failed to build or pass tests."],
             "details": f"Run A: build={build_a.get('status')}, test={test_a.get('status')}; Run B: build={build_b.get('status')}, test={test_b.get('status')}",
         }

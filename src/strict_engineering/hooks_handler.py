@@ -1,7 +1,8 @@
 """
-Strict Engineering Kernel V4.1 - Antigravity Hooks CLI Entrypoint
+Strict Engineering Kernel V5.1 - Antigravity Hooks CLI Entrypoint
 Handles stdin JSON payloads from PreToolUse, PreInvocation, and Stop events,
 executes policy gates, and writes valid JSON to stdout.
+Enforces fail-closed security for tool gates and completion protection.
 """
 
 import sys
@@ -45,7 +46,7 @@ def main():
                 state = kernel.load_state(workspace)
                 phase = state.get("phase", "ACTIVE")
                 msg = (
-                    f"Strict Engineering Kernel V4.1 active [Phase: {phase}]. "
+                    f"Strict Engineering Kernel V5.1 active [Phase: {phase}]. "
                     f"Work against locked requirement ledger and acceptance contracts. "
                     f"All evidence must be cryptographically chained. Unverified work is incomplete."
                 )
@@ -63,9 +64,20 @@ def main():
     except Exception as ex:
         sys.stderr.write(f"[Strict-Engineering-Hook] Critical Error in {action}: {ex}\n")
         traceback.print_exc(file=sys.stderr)
-        # Safe fallback so agent is not killed by hook failure
-        if action in {"pre-tool", "stop", "pretooluse"}:
-            print(json.dumps({"decision": "allow"}))
+        
+        # Contextual fail-closed policy (Section 41)
+        if action in {"pre-tool", "pretooluse", "pre_tool", "pre_tool_use"}:
+            # Fail-closed for tool mutations to prevent protected file tampering
+            print(json.dumps({
+                "decision": "deny",
+                "reason": f"PreToolUse gate encountered internal error: {str(ex)}. Failing closed to protect harness integrity."
+            }))
+        elif action in {"stop"}:
+            # Block completion when gate crashes to prevent unverified exit
+            print(json.dumps({
+                "decision": "continue",
+                "reason": f"Completion gate evaluation encountered internal error: {str(ex)}. Completion blocked."
+            }))
         else:
             print(json.dumps({}))
 

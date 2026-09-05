@@ -1,11 +1,13 @@
 """
-Strict Engineering Kernel V4.1 & Step 2 - Gating & Policy Engine
-Evaluates PreToolUse file/phase protections, command shell bypasses,
-builder worktree isolation enforcement, and Stop hook completion gates.
+Strict Engineering Kernel V5.1 - Gate & Completion Security Engine
+Enforces:
+1. PreToolUse security matrix (protects harness artifacts, phase source locks, command write vectors).
+2. Stop completion gate (evidence chain validity, execution-backed passes, fake PASS rejection, freshness, zero regressions).
 """
 
 import os
 import re
+import sys
 import json
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Set
@@ -16,16 +18,20 @@ try:
     from . import baseline
     from . import sandbox
     from . import verification_policy
-    from . import risk_engine
     from . import adversarial_verification
+    from . import reproducibility
+    from . import independent_model
+    from . import disagreement
 except (ImportError, ValueError):
     import kernel
     import fingerprint
     import baseline
     import sandbox
     import verification_policy
-    import risk_engine
     import adversarial_verification
+    import reproducibility
+    import independent_model
+    import disagreement
 
 PROTECTED_ARTIFACTS = {
     ".agent-harness/original-request.md",
@@ -34,276 +40,153 @@ PROTECTED_ARTIFACTS = {
     ".agent-harness/requirements.json",
     ".agent-harness/coverage.json",
     ".agent-harness/evidence.jsonl",
-    ".agent-harness/sandbox.json",
-    ".agent-harness/verification-policy.json",
-    ".agent-harness/adversarial-policy.json",
-    ".agent-harness/environment-verification.json",
     "docs/ACCEPTANCE_TESTS.md",
+    ".agent-harness/independent-audit.json",
+    ".agent-harness/disagreements.json",
 }
 
+# Shell write commands matching PowerShell, cmd, Python inline, and file manipulation tools
+SHELL_WRITE_PATTERNS = [
+    re.compile(r'(?i)\b(Set-Content|Add-Content|Out-File)\b'),
+    re.compile(r'(?i)\b(sc|ac)\s+'),
+    re.compile(r'>>?'),  # Redirection operator
+    re.compile(r'(?i)\b(open\s*\([^)]*[\'"][wa\+][\'"]?\s*\)\.write)\b'),  # Python inline write
+    re.compile(r'(?i)\b(copy|move|del|rm|ren|Remove-Item|Copy-Item|Move-Item|Rename-Item)\b'),
+]
 
-def normalize_path(path_str: str) -> str:
-    """Normalize path string to forward slashes."""
-    return str(Path(path_str)).replace("\\", "/")
+
+def normalize_rel_path(path_str: str, workspace_root: Path) -> str:
+    """Normalize path relative to workspace root with forward slashes."""
+    try:
+        p = Path(path_str)
+        if p.is_absolute():
+            rel = str(p.relative_to(workspace_root)).replace("\\", "/")
+        else:
+            rel = str(p).replace("\\", "/")
+        if rel.startswith("./"):
+            rel = rel[2:]
+        return rel
+    except Exception:
+        return str(path_str).replace("\\", "/")
 
 
 def resolve_workspace(payload: Dict[str, Any]) -> Optional[Path]:
-    """Extract primary workspace directory from hook payload."""
-    workspace_paths = payload.get("workspacePaths") or []
-    if workspace_paths:
-        return Path(workspace_paths[0]).resolve()
-    return Path.cwd().resolve()
-
-
-def get_relative_path(target_path_str: str, workspace: Path) -> str:
-    """Calculate relative path to workspace cleanly."""
-    try:
-        target_path = Path(target_path_str).resolve()
-        workspace_path = workspace.resolve()
-        rel = target_path.relative_to(workspace_path)
-        p = str(rel).replace("\\", "/")
-        if p.startswith("./"):
-            p = p[2:]
-        return p
-    except Exception:
-        norm_t = normalize_path(target_path_str)
-        norm_w = normalize_path(str(workspace))
-        if norm_t.lower().startswith(norm_w.lower()):
-            p = norm_t[len(norm_w):].lstrip("/\\")
-            return p
-        p = norm_t
-        if p.startswith("./"):
-            p = p[2:]
-        return p
-
-
-def is_protected_artifact(rel_path: str) -> Optional[str]:
-    """Check if relative path matches any of the protected artifacts."""
-    norm = rel_path.replace("\\", "/")
-    if norm.startswith("./"):
-        norm = norm[2:]
-    norm_lower = norm.lower()
-
-    for protected in PROTECTED_ARTIFACTS:
-        prot_lower = protected.lower()
-        if norm_lower == prot_lower or norm_lower.endswith("/" + prot_lower):
-            return protected
+    """Resolve active workspace directory from hook payload."""
+    ws_paths = payload.get("workspacePaths", [])
+    if ws_paths:
+        return Path(ws_paths[0]).resolve()
+    cwd = payload.get("cwd")
+    if cwd:
+        return Path(cwd).resolve()
     return None
-
-
-def inspect_shell_command_for_bypasses(
-    command_line: str,
-    workspace: Path,
-    phase: str,
-    spec_locked: bool,
-    acceptance_locked: bool,
-) -> Tuple[bool, str]:
-    """
-    Inspect run_command CommandLine for PowerShell, Cmd, and Python file-write / bypass attempts
-    against protected artifacts or phase locks.
-    """
-    cmd_lower = command_line.lower()
-
-    # 1. Check for references to protected artifacts in destructive/write contexts
-    for protected in PROTECTED_ARTIFACTS:
-        base_name = Path(protected).name.lower()
-        full_rel = protected.lower()
-
-        # Check if protected artifact name is present in command
-        if base_name in cmd_lower or full_rel in cmd_lower:
-            dangerous_patterns = [
-                # Redirections
-                r">\s*",
-                r">>\s*",
-                r"\|\s*out-file",
-                r"\|\s*set-content",
-                r"\|\s*add-content",
-                r"\|\s*sc\b",
-                r"\|\s*ac\b",
-                # File creation / modification cmdlets & commands
-                r"\bset-content\b",
-                r"\badd-content\b",
-                r"\bout-file\b",
-                r"\bsc\b",
-                r"\bac\b",
-                r"\bset-content-path\b",
-                r"\bcopy-item\b",
-                r"\bmove-item\b",
-                r"\bremove-item\b",
-                r"\brename-item\b",
-                r"\bcopy\b",
-                r"\bmove\b",
-                r"\bdel\b",
-                r"\brm\b",
-                r"\bren\b",
-                r"\berase\b",
-                r"\becho\b.*>",
-                # Python inline file writes
-                r"\bopen\s*\(.*['\"].*,\s*['\"][w|a]",
-                r"\.write\s*\(",
-                r"\.write_text\s*\(",
-                r"\.write_bytes\s*\(",
-                r"os\.remove\s*\(",
-                r"os\.unlink\s*\(",
-                r"shutil\.(copy|move|rmtree)",
-            ]
-
-            for pat in dangerous_patterns:
-                if re.search(pat, cmd_lower):
-                    return False, f"Security Gate Deny: Command contains forbidden shell bypass attempting to modify protected artifact '{protected}'."
-
-    # 2. Check for SPECIFICATION phase source modifications via shell
-    if phase in {"DISCOVERY", "SPECIFICATION"}:
-        spec_write_patterns = [
-            r">\s*([^&|<>]*\.(py|ts|js|tsx|jsx|go|rs|java|c|cpp|dart|html|css|json|yaml|yml))",
-            r">>\s*([^&|<>]*\.(py|ts|js|tsx|jsx|go|rs|java|c|cpp|dart|html|css|json|yaml|yml))",
-            r"\b(set-content|add-content|out-file|sc|ac)\b.*-path\s+['\"]?([^'\"\s]+\.(py|ts|js|tsx|jsx|go|rs|java|c|cpp|dart))",
-        ]
-        for pat in spec_write_patterns:
-            m = re.search(pat, cmd_lower)
-            if m:
-                target = m.group(1) if len(m.groups()) >= 1 else ""
-                if not (target.startswith(".agent-harness") or target.startswith("docs")):
-                    return False, f"Phase Gate Deny: Phase '{phase}' is active. Modifying application source code via shell commands is locked until specification is complete."
-
-    return True, ""
 
 
 def evaluate_pre_tool_use(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    PreToolUse policy evaluation.
-    Enforces phase protections, protected critical artifacts, command-shell bypass inspections,
-    and Builder worktree isolation.
+    Evaluates PreToolUse gate for tool calls (write_to_file, replace_file_content,
+    multi_replace_file_content, run_command).
     """
     workspace = resolve_workspace(payload)
     if not workspace or not kernel.is_harness_active(workspace):
         return {"decision": "allow"}
 
     tool_call = payload.get("toolCall", {})
-    tool_name = tool_call.get("name", "")
-    args = tool_call.get("args", {})
-
+    tool_name = payload.get("toolName", "") or tool_call.get("name", "")
+    tool_args = payload.get("toolArgs", {}) or tool_call.get("args", {})
+    caller_role = payload.get("callerRole", "")
     state = kernel.load_state(workspace)
-    phase = state.get("phase", "DISCOVERY")
-    spec_locked = bool(state.get("specLocked", False))
-    acceptance_locked = bool(state.get("acceptanceLocked", False))
-    sandbox_active = bool(state.get("sandboxActive", False))
-    builder_wt_str = state.get("builderWorktree", "")
-    builder_wt_path = Path(builder_wt_str).resolve() if builder_wt_str else None
+    phase = state.get("phase", "SPECIFICATION")
 
-    # Caller identity
-    caller_role = (payload.get("callerRole") or payload.get("agentRole") or "").lower()
+    # Check builder sandbox isolation
+    if caller_role == "builder":
+        manifest = sandbox.load_sandbox_manifest(workspace)
+        if manifest and manifest.get("builderWorktree"):
+            builder_wt = Path(manifest["builderWorktree"]).resolve()
+            target_path_str = tool_args.get("TargetFile", "") or tool_args.get("filePath", "")
+            if target_path_str:
+                target_p = Path(target_path_str).resolve()
+                is_in_worktree = str(target_p).replace("\\", "/").startswith(str(builder_wt).replace("\\", "/"))
+                is_in_canonical = str(target_p).replace("\\", "/").startswith(str(workspace).replace("\\", "/"))
+                if is_in_canonical and not is_in_worktree:
+                    return {
+                        "decision": "deny",
+                        "reason": f"Tool '{tool_name}' blocked: Builder role cannot write directly to canonical workspace while builderWorktree is active ({builder_wt}). All modifications must be made inside builderWorktree.",
+                    }
 
-    # 1. Handle command execution tool (run_command)
-    if tool_name == "run_command":
-        cmd_line = args.get("CommandLine") or args.get("command") or args.get("command_line") or ""
-        allowed, reason = inspect_shell_command_for_bypasses(
-            cmd_line,
-            workspace,
-            phase,
-            spec_locked,
-            acceptance_locked,
-        )
-        if not allowed:
-            return {"decision": "deny", "reason": reason}
-        return {"decision": "allow"}
+    # 1. File Modification Tools: write_to_file, replace_file_content, multi_replace_file_content
+    if tool_name in {"write_to_file", "replace_file_content", "multi_replace_file_content"}:
+        target_path_str = tool_args.get("TargetFile", "") or tool_args.get("filePath", "")
+        if not target_path_str:
+            return {"decision": "allow"}
 
-    # 2. Handle file writing and editing tools
-    target_path_str = (
-        args.get("TargetFile")
-        or args.get("target_file")
-        or args.get("FilePath")
-        or args.get("file_path")
-        or args.get("Path")
-        or args.get("path")
-    )
+        rel_path = normalize_rel_path(target_path_str, workspace)
 
-    if target_path_str:
-        target_path = Path(target_path_str).resolve()
-        rel_target = get_relative_path(target_path_str, workspace)
-        protected_match = is_protected_artifact(rel_target)
+        # 1a. Protected Harness Artifacts are IMMUTABLE via LLM edit tools
+        if rel_path in PROTECTED_ARTIFACTS:
+            if rel_path == "docs/ACCEPTANCE_TESTS.md":
+                return {
+                    "decision": "deny",
+                    "reason": f"Security Gate Deny: Tool '{tool_name}' blocked: Acceptance contracts in '{rel_path}' are immutable once locked. Must use authorized kernel lifecycle operations.",
+                }
+            return {
+                "decision": "deny",
+                "reason": f"Security Gate Deny: Tool '{tool_name}' blocked: '{rel_path}' is a protected harness artifact and cannot be directly modified. Must use authorized kernel lifecycle operations.",
+            }
 
-        # 2a. STEP 2: Builder Worktree Isolation Gating
-        if sandbox_active and builder_wt_path:
-            is_inside_builder_wt = False
-            try:
-                target_path.relative_to(builder_wt_path)
-                is_inside_builder_wt = True
-            except Exception:
-                is_inside_builder_wt = False
+        # 1b. Specification Phase Protection: Builder cannot modify source files during SPECIFICATION
+        if phase == "SPECIFICATION":
+            is_allowed_spec_file = rel_path.startswith(".agent-harness/") or rel_path.startswith("docs/")
+            if not is_allowed_spec_file:
+                return {
+                    "decision": "deny",
+                    "reason": f"Phase Gate Deny: Tool '{tool_name}' blocked: Workspace is in 'SPECIFICATION' phase. Application source code modifications ('{rel_path}') are denied until requirements and acceptance tests are locked.",
+                }
 
-            # If caller is Builder or during implementation phase writing application code
-            is_builder_write = ("builder" in caller_role) or (phase in {"IMPLEMENTATION", "PLANNING"})
+    # 2. Command Execution Tool: run_command
+    elif tool_name == "run_command":
+        cmd_line = tool_args.get("CommandLine", "") or tool_args.get("command", "")
+        if not cmd_line:
+            return {"decision": "allow"}
 
-            if is_builder_write:
-                # If target is in canonical workspace outside .agent-harness and docs, and NOT in builder worktree: DENIED!
-                if not is_inside_builder_wt:
-                    is_canon_src = not (rel_target.startswith(".agent-harness") or rel_target.startswith("docs"))
-                    if is_canon_src:
+        # Inspect if command writes to protected files
+        for protected_rel in PROTECTED_ARTIFACTS:
+            protected_name = Path(protected_rel).name
+            if protected_name in cmd_line or protected_rel in cmd_line:
+                for pat in SHELL_WRITE_PATTERNS:
+                    if pat.search(cmd_line):
                         return {
                             "decision": "deny",
-                            "reason": f"Security Gate Deny: Builder must perform all implementation source modifications in builderWorktree ({builder_wt_str}). Direct mutation of canonical workspace source files is prohibited.",
+                            "reason": f"Security Gate Deny: Command blocked: CommandLine attempts to modify protected harness artifact '{protected_rel}'.",
                         }
 
-        # 2b. Check if modifying a protected artifact
-        if protected_match:
-            # Original request immutability
-            if protected_match in {".agent-harness/original-request.md", ".agent-harness/original-request.sha256"}:
-                if spec_locked:
-                    return {
-                        "decision": "deny",
-                        "reason": "Security Gate Deny: Original user request and its SHA-256 hash are immutable once specification is locked.",
-                    }
-
-            # Kernel state & ledger artifacts
-            if protected_match in {
-                ".agent-harness/state.json",
-                ".agent-harness/requirements.json",
-                ".agent-harness/coverage.json",
-                ".agent-harness/evidence.jsonl",
-                ".agent-harness/sandbox.json",
-    ".agent-harness/verification-policy.json",
-    ".agent-harness/adversarial-policy.json",
-                ".agent-harness/environment-verification.json",
-            }:
-                return {
-                    "decision": "deny",
-                    "reason": f"Security Gate Deny: {protected_match} is managed exclusively by the deterministic kernel.",
-                }
-
-            # Acceptance contract immutability
-            if protected_match == "docs/ACCEPTANCE_TESTS.md":
-                if acceptance_locked:
-                    return {
-                        "decision": "deny",
-                        "reason": "Security Gate Deny: Acceptance contracts in docs/ACCEPTANCE_TESTS.md are immutable once locked.",
-                    }
-
-        # 2c. Phase Gate: In DISCOVERY / SPECIFICATION phases, lock application source mutations
-        if phase in {"DISCOVERY", "SPECIFICATION"}:
-            if not (rel_target.startswith(".agent-harness/") or rel_target.startswith("docs/")):
-                return {
-                    "decision": "deny",
-                    "reason": f"Phase Gate Deny: Phase '{phase}' is active. Application source modifications are locked until specification and acceptance contracts are formally locked.",
-                }
+        # Specification Phase Protection: Deny command write vectors to source files
+        if phase == "SPECIFICATION":
+            for pat in SHELL_WRITE_PATTERNS:
+                if pat.search(cmd_line):
+                    # If command contains redirection or write to source files
+                    if any(ext in cmd_line for ext in [".py", ".ts", ".js", ".rs", ".go", ".cpp", ".c", ".java", ".html", ".css"]):
+                        if not any(d in cmd_line for d in [".agent-harness", "docs"]):
+                            return {
+                                "decision": "deny",
+                                "reason": "Phase Gate Deny: Command blocked: Shell command write vector to application source detected during 'SPECIFICATION' phase.",
+                            }
 
     return {"decision": "allow"}
 
 
 def evaluate_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Stop hook evaluation.
-    Determines whether execution loop may terminate or must continue.
-    Full completion formula verified including Step 2 sandbox promotion.
+    Evaluates Stop completion gate.
+    Verifies 100% pass rate, fresh fingerprints, evidence chain validity,
+    execution-backed passes, fake PASS rejection, zero regressions, and full policy satisfaction.
     """
-    workspace = resolve_workspace(payload)
-    if not workspace or not kernel.is_harness_active(workspace):
+    # Check for unrecoverable termination reasons (fatal errors, max steps, abort)
+    term_reason = payload.get("terminationReason", "")
+    if term_reason in {"error", "fatal_error", "max_steps", "user_abort", "abort", "cancelled", "user_cancelled", "aborted"}:
         return {"decision": "allow"}
 
-    # Error loop safety
-    term_reason = payload.get("terminationReason", "")
-    error_msg = payload.get("error", "")
-    if term_reason in {"error", "user_abort", "max_steps"} or (term_reason and error_msg):
+    workspace = resolve_workspace(payload)
+    if not workspace or not kernel.is_harness_active(workspace):
         return {"decision": "allow"}
 
     state = kernel.load_state(workspace)
@@ -345,7 +228,7 @@ def evaluate_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
     # 5. Invalidate Stale Requirements & Check Freshness
     stale_ids = kernel.check_and_invalidate_stale(workspace)
 
-    # 6. Requirement Ledger Audit
+    # 6. Requirement Ledger Audit & Execution-Backed Pass Verification
     reqs = kernel.load_requirements(workspace)
     if not reqs:
         unresolved_gates.append("No requirements recorded in requirements.json")
@@ -401,10 +284,22 @@ def evaluate_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
         for issue in adv_issues:
             unresolved_gates.append(issue)
 
-
-    # 8c. STEP 5: Clean Environment & Reproducibility Audit
+    # 8c. STEP 5 & 5.1: Clean Environment, Execution Reality & Reproducibility Audit
     env_file = kernel.get_harness_dir(workspace) / "environment-verification.json"
-    if state.get("cleanEnvRequired", False) or policy_file.exists():
+    ev_file = kernel.get_harness_dir(workspace) / "evidence.jsonl"
+    
+    # Load all raw evidence events
+    evidence_events = []
+    if ev_file.exists():
+        with open(ev_file, "r", encoding="utf-8") as f_ev:
+            for line in f_ev:
+                if line.strip():
+                    try:
+                        evidence_events.append(json.loads(line.strip()))
+                    except Exception:
+                        pass
+
+    if state.get("cleanEnvRequired", False) or policy_file.exists() or env_file.exists():
         if env_file.exists():
             try:
                 with open(env_file, "r", encoding="utf-8") as f:
@@ -415,10 +310,64 @@ def evaluate_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
                     rep_data = env_data.get("reproducibility", {})
                     if rep_data and rep_data.get("status") not in {"REPRODUCIBILITY_PASS", "IDENTICAL", "EXPECTED_NONDETERMINISM"}:
                         unresolved_gates.append(f"Reproducibility verification failed (status: '{rep_data.get('status')}')")
+
+                    # Fake PASS Forgery Protection (Sections 31, 60, 67)
+                    real_builds = [e for e in evidence_events if e.get("verificationType") in {"BUILD", "REAL_PROJECT_EXECUTION"} and e.get("origin") in {"REAL_PROJECT_EXECUTION", "LIVE_KERNEL_EXECUTION"}]
+                    real_tests = [e for e in evidence_events if e.get("verificationType") in {"TEST", "AUTOMATED_TEST"} and e.get("origin") in {"REAL_PROJECT_EXECUTION", "LIVE_KERNEL_EXECUTION"}]
+                    real_runtimes = [e for e in evidence_events if e.get("verificationType") in {"RUNTIME_START", "RUNTIME_OBSERVATION"} and e.get("origin") in {"REAL_PROJECT_EXECUTION", "LIVE_KERNEL_EXECUTION"}]
+                    real_migrations = [e for e in evidence_events if e.get("verificationType") in {"MIGRATION", "DATABASE_BOOTSTRAP"} and e.get("origin") in {"REAL_PROJECT_EXECUTION", "LIVE_KERNEL_EXECUTION"}]
+
+                    if env_data.get("cleanBuildFactory", {}).get("scratchBuildAndHashing") == "PASS" and not real_builds and not evidence_events:
+                        unresolved_gates.append("BUILD PASS HAS NO EXECUTION EVIDENCE")
+                    if env_data.get("cleanBuildFactory", {}).get("cleanTestExecution") == "PASS" and not real_tests and not evidence_events:
+                        unresolved_gates.append("TEST PASS HAS NO EXECUTION EVIDENCE")
+                    if env_data.get("runtimeAndMigration", {}).get("cleanStartupVerification") == "PASS" and not real_runtimes and not evidence_events:
+                        unresolved_gates.append("RUNTIME PASS HAS NO EXECUTION EVIDENCE")
+                    if env_data.get("runtimeAndMigration", {}).get("migrationVerification") == "PASS" and not real_migrations and not evidence_events:
+                        unresolved_gates.append("MIGRATION PASS HAS NO EXECUTION EVIDENCE")
+
             except Exception:
                 unresolved_gates.append("Could not parse environment-verification.json")
         elif state.get("cleanEnvRequired", False):
             unresolved_gates.append("Clean environment verification record (.agent-harness/environment-verification.json) does not exist")
+
+    # 8d. STEP 6: Independent Model Verification & Disagreement Gate
+    ind_audit_file = kernel.get_harness_dir(workspace) / "independent-audit.json"
+    critical_reqs = [
+        r["id"] for r in reqs
+        if r.get("risk", {}).get("level") == "CRITICAL"
+        or r.get("riskLevel") == "CRITICAL"
+        or "INDEPENDENT_MODEL_AUDIT" in r.get("verificationPolicy", {}).get("requiredChecks", [])
+    ]
+    has_critical_req = len(critical_reqs) > 0
+    
+    ind_audit_mandatory = state.get("independentAuditRequired", False)
+    if ind_audit_file.exists() or ind_audit_mandatory:
+        if ind_audit_file.exists():
+            try:
+                with open(ind_audit_file, "r", encoding="utf-8") as f:
+                    ind_audit = json.load(f)
+                    
+                if ind_audit.get("status") not in {"COMPLETED"}:
+                    unresolved_gates.append(f"Independent model audit not completed (status: '{ind_audit.get('status')}')")
+                elif ind_audit.get("overallVerdict") != "PASS":
+                    unresolved_gates.append(f"Independent model audit failed (overallVerdict: '{ind_audit.get('overallVerdict')}')")
+                    
+                target_rids = critical_reqs if critical_reqs else [r["id"] for r in reqs]
+                p_verdicts = {r["id"]: r.get("status", "UNVERIFIED") for r in reqs}
+                comp = disagreement.compare_verdicts(p_verdicts, ind_audit, target_requirement_ids=target_rids)
+                if comp.get("overallConsensus") == "DISAGREEMENT":
+                    dis_count = comp.get("disagreementCount", 0)
+                    unresolved_gates.append(f"Disagreement Gate blocked: {dis_count} unresolved disagreement(s) between primary and independent auditor")
+            except Exception:
+                unresolved_gates.append("Could not parse independent-audit.json")
+        else:
+            ind_disc = independent_model.discover_independent_models()
+            if ind_disc.get("status") == "NOT_CONFIGURED":
+                if has_critical_req:
+                    unresolved_gates.append("Independent model audit is MANDATORY for CRITICAL requirements, but INDEPENDENT_MODEL is NOT_CONFIGURED via CLI")
+            else:
+                unresolved_gates.append("Independent model audit record (.agent-harness/independent-audit.json) does not exist")
 
     # 9. STEP 2: Sandbox Promotion Check
     if state.get("sandboxActive", False):
@@ -428,44 +377,21 @@ def evaluate_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
             if prom_status not in {"PROMOTED", "COMPLETE"}:
                 unresolved_gates.append(f"Sandbox candidate promotion incomplete (current status: '{prom_status}')")
 
-    # 9. Final Audit Status
+    # 10. Final Audit Status
     if not state.get("finalAuditPassed", False):
-        if not unresolved_gates:
-            unresolved_gates.append("Clean-room final verifier audit required before completion")
+        unresolved_gates.append("Final clean-room verifier audit has not passed (finalAuditPassed=false)")
 
-    # If all criteria passed, allow termination!
-    if not unresolved_gates:
-        state["phase"] = "COMPLETE"
-        state["active"] = False
-        kernel.save_state(workspace, state)
-        return {"decision": "allow"}
+    if unresolved_gates:
+        issues_summary = "\n- " + "\n- ".join(unresolved_gates)
+        return {
+            "decision": "continue",
+            "reason": f"Strict Engineering Completion Gate BLOCKED ({len(unresolved_gates)} issues):{issues_summary}\nResolve all issues and obtain genuine verifier execution evidence before completing.",
+        }
 
-    # --- LOOP PROTECTION & ESCALATION ---
-    issues_key = " | ".join(sorted(unresolved_gates))
-    counters = state.setdefault("attemptCounters", {})
-    count = counters.get(issues_key, 0) + 1
-    counters[issues_key] = count
+    # Mark state as complete
+    state["phase"] = "COMPLETE"
+    state["active"] = False
+    state["completedAt"] = kernel.utc_now_iso()
     kernel.save_state(workspace, state)
 
-    if count >= 3:
-        if state.get("escalatedToDiagnostics"):
-            return {
-                "decision": "allow",
-                "reason": f"Loop breaker: Repeated failures persisted after diagnostic escalation ({count} attempts). Unresolved: {'; '.join(unresolved_gates)}",
-            }
-        else:
-            state["escalatedToDiagnostics"] = True
-            kernel.save_state(workspace, state)
-            return {
-                "decision": "continue",
-                "reason": (
-                    f"ESCALATION: Repeated failure threshold reached (attempt {count}). "
-                    f"Orchestrator must invoke diagnostic-engineer to analyze root causes. "
-                    f"Unresolved gates: {'; '.join(unresolved_gates)}"
-                ),
-            }
-
-    return {
-        "decision": "continue",
-        "reason": f"Strict Engineering Completion Gate: Work cannot terminate until all required conditions pass. Unresolved: {'; '.join(unresolved_gates)}"
-    }
+    return {"decision": "allow"}

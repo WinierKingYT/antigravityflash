@@ -1,4 +1,4 @@
-{
+﻿{
   "strict-engineering": {
     "PreToolUse": [
       {
@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python C:\\Users\\ahmet\\.gemini\\config\\strict-engineering\\hooks_handler.py pre-tool",
+            "command": "C:\\Users\\ahmet\\AppData\\Local\\Python\\bin\\python.exe C:\\Users\\ahmet\\.gemini\\config\\strict-engineering\\hooks_handler.py pre-tool",
             "timeout": 15
           }
         ]
@@ -15,14 +15,14 @@
     "PreInvocation": [
       {
         "type": "command",
-        "command": "python C:\\Users\\ahmet\\.gemini\\config\\strict-engineering\\hooks_handler.py pre-invocation",
+        "command": "C:\\Users\\ahmet\\AppData\\Local\\Python\\bin\\python.exe C:\\Users\\ahmet\\.gemini\\config\\strict-engineering\\hooks_handler.py pre-invocation",
         "timeout": 10
       }
     ],
     "Stop": [
       {
         "type": "command",
-        "command": "python C:\\Users\\ahmet\\.gemini\\config\\strict-engineering\\hooks_handler.py stop",
+        "command": "C:\\Users\\ahmet\\AppData\\Local\\Python\\bin\\python.exe C:\\Users\\ahmet\\.gemini\\config\\strict-engineering\\hooks_handler.py stop",
         "timeout": 30
       }
     ]

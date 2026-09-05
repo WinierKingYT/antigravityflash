@@ -1,8 +1,8 @@
 """
-Strict Engineering Kernel Step 3, 4 & 5 - Verification Policy Compiler
+Strict Engineering Kernel Step 3, 4, 5 & 6 - Verification Policy Compiler
 Compiles machine-readable verification policies (.agent-harness/verification-policy.json),
-enforces capability awareness, adversarial test quality, clean environment requirements,
-and validates policy satisfaction against the evidence chain.
+enforces capability awareness, adversarial test quality, clean environment,
+independent model verification (Step 6), and validates policy satisfaction against the evidence chain.
 """
 
 import os
@@ -15,11 +15,15 @@ try:
     from . import risk_engine
     from . import environment_detector
     from . import reproducibility
+    from . import independent_model
+    from . import disagreement
 except (ImportError, ValueError):
     import kernel
     import risk_engine
     import environment_detector
     import reproducibility
+    import independent_model
+    import disagreement
 
 POLICY_SCHEMA_VERSION = "3.0.0"
 
@@ -34,6 +38,7 @@ CHECK_TYPES = [
     "POST_PROMOTION",
     "CLEAN_ENVIRONMENT",
     "REPRODUCIBILITY",
+    "INDEPENDENT_MODEL_AUDIT",
 ]
 
 
@@ -68,13 +73,30 @@ def detect_project_capabilities(workspace_dir: Path) -> Dict[str, Any]:
             is_web_ui = True
             break
 
+    # Discover independent model availability and workspace configuration
+    state_file = workspace_path / ".agent-harness" / "state.json"
+    independent_audit_req = False
+    if state_file.exists():
+        try:
+            with open(state_file, "r", encoding="utf-8") as f:
+                s_data = json.load(f)
+                independent_audit_req = bool(s_data.get("independentAuditRequired", False))
+        except Exception:
+            pass
+
+    ind_disc = independent_model.discover_independent_models()
+    has_independent_model = ind_disc.get("status") == "AVAILABLE" or independent_audit_req
+
     return {
+        "independentAuditRequired": independent_audit_req,
         "hasTypecheck": has_typecheck,
         "hasBuild": has_build,
         "hasTest": has_test,
         "hasLint": has_lint,
         "isWebUi": is_web_ui,
         "isCli": not is_web_ui,
+        "hasIndependentModel": has_independent_model,
+        "independentModelSlug": ind_disc.get("independentModelSlug"),
     }
 
 
@@ -105,6 +127,14 @@ def compile_verification_policy(
     is_dep_change = "dependency" in all_text or "package" in all_text or "toolchain" in all_text
     is_migration = "migration" in all_text or "schema" in all_text or "database" in all_text
     is_repro = "reproducib" in all_text or "double-build" in all_text
+    is_ind_audit_flagged = "independent" in all_text or req.get("independentAuditRequired", False)
+
+    is_ind_audit_enabled = (
+        bool(capabilities and capabilities.get("hasIndependentModel"))
+        or bool(capabilities and capabilities.get("independentAuditRequired"))
+        or bool(req.get("independentAuditRequired"))
+        or is_ind_audit_flagged
+    )
 
     if risk_level == "LOW":
         # Low risk: static check + single automated behavioral check
@@ -115,6 +145,9 @@ def compile_verification_policy(
         if is_persistence:
             required_checks.append("RESTART_PERSISTENCE")
             applicable_checks.append("RESTART_PERSISTENCE")
+        if is_ind_audit_enabled and is_ind_audit_flagged:
+            required_checks.append("INDEPENDENT_MODEL_AUDIT")
+            applicable_checks.append("INDEPENDENT_MODEL_AUDIT")
     elif risk_level == "HIGH":
         required_checks.extend(["RUNTIME_OBSERVATION", "NEGATIVE_PATH", "POST_PROMOTION"])
         applicable_checks.extend(["RUNTIME_OBSERVATION", "NEGATIVE_PATH", "POST_PROMOTION"])
@@ -124,6 +157,9 @@ def compile_verification_policy(
         if is_untrusted_input or is_auth:
             if "NEGATIVE_PATH" not in required_checks:
                 required_checks.append("NEGATIVE_PATH")
+        if is_ind_audit_enabled and (is_auth or is_destructive or is_ind_audit_flagged):
+            required_checks.append("INDEPENDENT_MODEL_AUDIT")
+            applicable_checks.append("INDEPENDENT_MODEL_AUDIT")
     elif risk_level == "CRITICAL":
         required_checks.extend([
             "RUNTIME_OBSERVATION",
@@ -131,11 +167,14 @@ def compile_verification_policy(
             "CLEAN_ROOM_AUDIT",
             "POST_PROMOTION",
         ])
+        if is_ind_audit_enabled:
+            required_checks.append("INDEPENDENT_MODEL_AUDIT")
         applicable_checks.extend([
             "RUNTIME_OBSERVATION",
             "NEGATIVE_PATH",
             "CLEAN_ROOM_AUDIT",
             "POST_PROMOTION",
+            "INDEPENDENT_MODEL_AUDIT",
         ])
         if is_persistence:
             required_checks.append("RESTART_PERSISTENCE")
@@ -144,7 +183,7 @@ def compile_verification_policy(
             required_checks.append("RECOVERY_OBSERVATION")
             applicable_checks.append("RECOVERY_OBSERVATION")
 
-    # Step 5 Clean Environment & Reproducibility integration based on component characteristics
+    # Step 5 Clean Environment & Reproducibility integration
     if is_dep_change or is_migration:
         required_checks.append("CLEAN_ENVIRONMENT")
         applicable_checks.append("CLEAN_ENVIRONMENT")
@@ -205,13 +244,11 @@ def generate_and_save_policy_matrix(workspace_dir: Path) -> Dict[str, Any]:
 
     policies = {}
     for req in reqs:
-        # Evaluate risk if not present
         if "risk" not in req or not req["risk"].get("level"):
             req["risk"] = risk_engine.evaluate_requirement_risk(req)
         p = compile_verification_policy(req, caps)
         policies[req.get("id")] = p
 
-    # Save updated requirements with risk
     kernel.save_requirements(workspace_path, reqs)
 
     matrix = {
@@ -226,7 +263,7 @@ def generate_and_save_policy_matrix(workspace_dir: Path) -> Dict[str, Any]:
 def audit_verification_policy(workspace_dir: Path) -> Tuple[bool, List[str], Dict[str, Any]]:
     """
     Authoritative completion audit verifying that all required policy checks
-    are satisfied by genuine evidence in evidence.jsonl.
+    are satisfied by genuine evidence in evidence.jsonl and Step 5/6 artifacts.
     """
     workspace_path = Path(workspace_dir).resolve()
     matrix = load_verification_policy_matrix(workspace_path)
@@ -236,7 +273,6 @@ def audit_verification_policy(workspace_dir: Path) -> Tuple[bool, List[str], Dic
     policies = matrix.get("policies", {})
     ev_file = workspace_path / ".agent-harness" / "evidence.jsonl"
     
-    # Read all valid PASS evidence events
     evidence_events = []
     if ev_file.exists():
         with open(ev_file, "r", encoding="utf-8") as f:
@@ -258,25 +294,30 @@ def audit_verification_policy(workspace_dir: Path) -> Tuple[bool, List[str], Dic
         "byRisk": {"LOW": 0, "MEDIUM": 0, "HIGH": 0, "CRITICAL": 0},
     }
 
-    # Check clean environment verification state
     env_state = reproducibility.load_environment_verification_state(workspace_path)
     clean_env_passed = env_state is not None and env_state.get("status") == "CLEAN_ENVIRONMENT_PASS"
     reproducibility_passed = env_state is not None and env_state.get("reproducibility", {}).get("status") in {"REPRODUCIBILITY_PASS", "IDENTICAL", "EXPECTED_NONDETERMINISM"}
+
+    # Independent audit state
+    ind_audit = independent_model.load_audit_record(workspace_path)
+    ind_passed_reqs = set()
+    if ind_audit and ind_audit.get("status") == "COMPLETED" and ind_audit.get("overallVerdict") == "PASS":
+        for r in ind_audit.get("requirements", []):
+            if r.get("verdict") == "PASS":
+                ind_passed_reqs.add(r.get("id"))
 
     for req_id, policy in policies.items():
         risk_lvl = policy.get("riskLevel", "LOW")
         stats["byRisk"][risk_lvl] = stats["byRisk"].get(risk_lvl, 0) + 1
         required = set(policy.get("requiredChecks", []))
         
-        # Determine completed checks from evidence
         completed = set()
         for ev in evidence_events:
             req_ids = ev.get("requirementIds", [])
-            if req_id in req_ids or not req_ids:  # Global evidence applies to all
+            if req_id in req_ids or not req_ids:
                 cmd = ev.get("commandOrInteraction", "").upper()
                 v_type = ev.get("verificationType", "").upper()
                 
-                # Map evidence type to check types
                 if v_type in {"AUTOMATED_TEST", "EXECUTED_COMMAND"}:
                     completed.add("STATIC")
                     completed.add("AUTOMATED_TEST")
@@ -296,11 +337,15 @@ def audit_verification_policy(workspace_dir: Path) -> Tuple[bool, List[str], Dic
                     completed.add("CLEAN_ENVIRONMENT")
                 if "REPRO" in cmd or v_type == "REPRODUCIBILITY":
                     completed.add("REPRODUCIBILITY")
+                if "INDEPENDENT" in cmd or v_type == "INDEPENDENT_MODEL_AUDIT":
+                    completed.add("INDEPENDENT_MODEL_AUDIT")
 
         if clean_env_passed:
             completed.add("CLEAN_ENVIRONMENT")
         if reproducibility_passed:
             completed.add("REPRODUCIBILITY")
+        if req_id in ind_passed_reqs:
+            completed.add("INDEPENDENT_MODEL_AUDIT")
 
         missing = required - completed
         policy["completedChecks"] = sorted(list(completed & required))
@@ -315,8 +360,6 @@ def audit_verification_policy(workspace_dir: Path) -> Tuple[bool, List[str], Dic
                 f"Requirement {req_id} ({risk_lvl}) missing required verification: {', '.join(sorted(missing))}"
             )
 
-    # Save updated matrix with completion stats
     save_verification_policy_matrix(workspace_path, matrix)
-
     is_complete = len(unresolved_issues) == 0
     return is_complete, unresolved_issues, stats

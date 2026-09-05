@@ -25,10 +25,12 @@ try:
     from . import kernel
     from . import fingerprint
     from . import baseline
+    from . import context_registry
 except (ImportError, ValueError):
     import kernel
     import fingerprint
     import baseline
+    import context_registry
 
 
 SECRET_PATTERNS = [
@@ -162,11 +164,37 @@ def compile_blind_verification_packet(
     env_ver_file = harness / "environment-verification.json"
     env_ver_data = json.loads(env_ver_file.read_text(encoding="utf-8")) if env_ver_file.exists() else {}
 
-    context_isolation = "FRESH_CONTEXT" if is_fresh_context else "NOT_PROVEN"
+    # Authoritative context isolation evaluation from context_registry (Step 6S.1)
+    allow_simulated = bool(kwargs.get("allow_simulated", False))
+    iso_status, iso_details = context_registry.evaluate_context_isolation(
+        ws,
+        verifier_purpose="BLIND_FINAL_VERIFIER",
+        predecessor_purposes=["BUILDER"],
+        allow_simulated=allow_simulated,
+    )
+    verifier_ctx = context_registry.get_registered_context_by_purpose(ws, "BLIND_FINAL_VERIFIER")
+    if verifier_ctx and iso_status == "FRESH_CONTEXT_VERIFIED":
+        runtime_conversation_id = verifier_ctx.get("conversationId", "")
+        context_reg_event_id = verifier_ctx.get("contextEventId", "")
+        context_proof_hash = verifier_ctx.get("eventHash", "")
+        context_isolation = "FRESH_CONTEXT_VERIFIED"
+    elif verifier_ctx and allow_simulated and verifier_ctx.get("origin") in {"MOCK", "SIMULATED_INTEGRATION"}:
+        runtime_conversation_id = verifier_ctx.get("conversationId", "")
+        context_reg_event_id = verifier_ctx.get("contextEventId", "")
+        context_proof_hash = verifier_ctx.get("eventHash", "")
+        context_isolation = "FRESH_CONTEXT_SIMULATED"
+    else:
+        runtime_conversation_id = ""
+        context_reg_event_id = ""
+        context_proof_hash = ""
+        context_isolation = iso_status
 
     bundle_payload = {
         "taskId": task_id,
         "contextId": context_id,
+        "runtimeConversationId": runtime_conversation_id,
+        "contextRegistryEventId": context_reg_event_id,
+        "contextProofHash": context_proof_hash,
         "contextIsolation": context_isolation,
         "requirementIds": req_ids,
         "candidateFingerprint": cand_fp,
@@ -204,6 +232,8 @@ You are an independent, blind software compliance verifier operating under stric
 Model: Gemini Pro.
 Role: BLIND_FINAL_VERIFIER.
 Context Isolation: {context_isolation}
+Runtime Conversation ID: {runtime_conversation_id or '[UNPROVEN]'}
+Context Proof Hash: {context_proof_hash or '[UNPROVEN]'}
 
 ADVERSARIAL VERIFIER OBJECTIVE:
 Attempt to prove that each supplied requirement is NOT satisfied.
@@ -288,6 +318,9 @@ You MUST return ONLY a valid, parseable JSON object adhering to Schema 6S.0 with
         "auditId": verification_id,
         "taskId": task_id,
         "contextId": context_id,
+        "runtimeConversationId": runtime_conversation_id,
+        "contextRegistryEventId": context_reg_event_id,
+        "contextProofHash": context_proof_hash,
         "contextIsolation": context_isolation,
         "requirementIds": req_ids,
         "candidateFingerprint": cand_fp,
@@ -309,6 +342,9 @@ def validate_blind_verification_response(
     expected_verification_id: Optional[str] = None,
     expected_fingerprint: Optional[str] = None,
     target_requirement_ids: Optional[List[str]] = None,
+    expected_conversation_id: Optional[str] = None,
+    disallowed_conversation_ids: Optional[List[str]] = None,
+    expected_context_proof_hash: Optional[str] = None,
 ) -> Tuple[bool, Dict[str, Any], str]:
     """
     Strictly validates Schema 6S.0 structured JSON response from Blind Final Verifier.
@@ -345,6 +381,17 @@ def validate_blind_verification_response(
 
     if expected_fingerprint and data.get("candidateFingerprint") != expected_fingerprint:
         return False, data, f"VERIFIER_INVALID: Candidate fingerprint mismatch (expected {expected_fingerprint}, got {data.get('candidateFingerprint')})"
+
+    resp_cid = data.get("conversationId") or data.get("runtimeConversationId")
+    if resp_cid:
+        if disallowed_conversation_ids and any(resp_cid == d_cid for d_cid in disallowed_conversation_ids):
+            return False, data, f"VERIFIER_INVALID: Verdict generated in Builder/disallowed context '{resp_cid}'"
+        if expected_conversation_id and resp_cid != expected_conversation_id:
+            return False, data, f"VERIFIER_INVALID: conversationId mismatch (expected {expected_conversation_id}, got {resp_cid})"
+
+    resp_cph = data.get("contextProofHash")
+    if expected_context_proof_hash and resp_cph and resp_cph != expected_context_proof_hash:
+        return False, data, f"VERIFIER_INVALID: contextProofHash mismatch (expected {expected_context_proof_hash}, got {resp_cph})"
 
     reqs = data.get("requirements", [])
     if not isinstance(reqs, list):
@@ -409,12 +456,16 @@ def invoke_blind_verifier(
                     "createdAt": created_at
                 }
 
+            expected_cid = verification_packet.get("runtimeConversationId") or None
+            expected_cph = verification_packet.get("contextProofHash") or None
             is_valid, parsed_data, verdict = validate_blind_verification_response(
                 raw_stdout,
                 expected_packet_hash=verification_packet["packetHash"],
                 expected_verification_id=verification_packet["verificationId"],
                 expected_fingerprint=verification_packet["candidateFingerprint"],
-                target_requirement_ids=verification_packet.get("requirementIds")
+                target_requirement_ids=verification_packet.get("requirementIds"),
+                expected_conversation_id=expected_cid,
+                expected_context_proof_hash=expected_cph,
             )
 
             return {
@@ -425,7 +476,10 @@ def invoke_blind_verifier(
                 "overallVerdict": verdict if is_valid else "FAIL",
                 "role": "BLIND_FINAL_VERIFIER",
                 "model": parsed_data.get("model", runner_model),
-                "contextIsolation": verification_packet.get("contextIsolation", "FRESH_CONTEXT"),
+                "contextIsolation": verification_packet.get("contextIsolation", "NOT_PROVEN"),
+                "runtimeConversationId": verification_packet.get("runtimeConversationId", ""),
+                "contextRegistryEventId": verification_packet.get("contextRegistryEventId", ""),
+                "contextProofHash": verification_packet.get("contextProofHash", ""),
                 "requirements": parsed_data.get("requirements", []),
                 "blockingFindings": parsed_data.get("blockingFindings", []),
                 "durationSec": round(duration, 3),
@@ -467,12 +521,16 @@ def invoke_blind_verifier(
                 "createdAt": created_at
             }
 
+        expected_cid = verification_packet.get("runtimeConversationId") or None
+        expected_cph = verification_packet.get("contextProofHash") or None
         is_valid, parsed_data, verdict = validate_blind_verification_response(
             proc.stdout,
             expected_packet_hash=verification_packet["packetHash"],
             expected_verification_id=verification_packet["verificationId"],
             expected_fingerprint=verification_packet["candidateFingerprint"],
-            target_requirement_ids=verification_packet.get("requirementIds")
+            target_requirement_ids=verification_packet.get("requirementIds"),
+            expected_conversation_id=expected_cid,
+            expected_context_proof_hash=expected_cph,
         )
 
         return {
@@ -483,7 +541,10 @@ def invoke_blind_verifier(
             "overallVerdict": verdict if is_valid else "VERIFIER_INVALID",
             "role": "BLIND_FINAL_VERIFIER",
             "model": parsed_data.get("model", {"family": "gemini", "slug": model_slug}),
-            "contextIsolation": verification_packet.get("contextIsolation", "FRESH_CONTEXT"),
+            "contextIsolation": verification_packet.get("contextIsolation", "NOT_PROVEN"),
+            "runtimeConversationId": verification_packet.get("runtimeConversationId", ""),
+            "contextRegistryEventId": verification_packet.get("contextRegistryEventId", ""),
+            "contextProofHash": verification_packet.get("contextProofHash", ""),
             "requirements": parsed_data.get("requirements", []),
             "blockingFindings": parsed_data.get("blockingFindings", []),
             "durationSec": round(duration, 3),

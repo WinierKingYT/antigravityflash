@@ -18,9 +18,18 @@ from typing import Dict, Any, List, Optional, Tuple, Set
 try:
     from . import fingerprint
     from . import baseline
+    from . import context_registry
 except (ImportError, ValueError):
     import fingerprint
     import baseline
+    import context_registry
+
+compute_context_event_hash = context_registry.compute_context_event_hash
+register_runtime_context = context_registry.register_runtime_context
+verify_context_registry = context_registry.verify_context_registry
+load_context_registry = context_registry.load_context_registry
+get_registered_context_by_purpose = context_registry.get_registered_context_by_purpose
+evaluate_context_isolation = context_registry.evaluate_context_isolation
 
 ALLOWED_STATUSES = {
     "NOT_STARTED",

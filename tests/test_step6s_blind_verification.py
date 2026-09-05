@@ -41,6 +41,7 @@ try:
     from . import evidence_resolution
     from . import reporting
     from . import gate
+    from . import context_registry
 except (ImportError, ValueError):
     import kernel
     import fingerprint
@@ -58,6 +59,7 @@ except (ImportError, ValueError):
     import evidence_resolution
     import reporting
     import gate
+    import context_registry
 
 
 class Step6SSingleModelBlindVerificationTestSuite(unittest.TestCase):
@@ -104,8 +106,27 @@ class Step6SSingleModelBlindVerificationTestSuite(unittest.TestCase):
                 "verificationMode": "SINGLE_MODEL_BLIND",
                 "blindAuditRequired": True,
                 "cleanEnvRequired": False,
-                "finalAuditPassed": True
+                "finalAuditPassed": True,
+                "allowSimulatedContext": True,
             }, indent=2), encoding="utf-8"
+        )
+        context_registry.register_runtime_context(
+            ws,
+            {"conversationId": "conv-test-builder", "transcriptPath": "/brain/conv-test-builder/transcript.jsonl", "artifactDirectoryPath": "/brain/conv-test-builder"},
+            context_purpose="BUILDER",
+            origin="SIMULATED_INTEGRATION",
+        )
+        context_registry.register_runtime_context(
+            ws,
+            {"conversationId": "conv-test-verifier", "transcriptPath": "/brain/conv-test-verifier/transcript.jsonl", "artifactDirectoryPath": "/brain/conv-test-verifier"},
+            context_purpose="BLIND_FINAL_VERIFIER",
+            origin="SIMULATED_INTEGRATION",
+        )
+        context_registry.register_runtime_context(
+            ws,
+            {"conversationId": "conv-test-auditor", "transcriptPath": "/brain/conv-test-auditor/transcript.jsonl", "artifactDirectoryPath": "/brain/conv-test-auditor"},
+            context_purpose="COUNTEREXAMPLE_AUDITOR",
+            origin="SIMULATED_INTEGRATION",
         )
         (ws / "docs" / "ACCEPTANCE_TESTS.md").write_text("# Acceptance Tests\n- User auth valid.", encoding="utf-8")
         subprocess.run(["git", "add", "."], cwd=str(ws), capture_output=True)

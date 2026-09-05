@@ -504,6 +504,98 @@ load_canonical_summary = load_run_summary
 def render_report_text(summary: Dict[str, Any]) -> str:
     version = summary.get("schemaVersion", "6S.0")
 
+    # Step 6S.1 Format (6S.1)
+    if version in {"6S.1", "6S.1.0"} or summary.get("schemaVersion") in {"6S.1", "6S.1.0"} or summary.get("finalVerdict") in {"STEP 6S.1 VERIFIED", "STEP 6S.1 PARTIALLY VERIFIED", "STEP 6S.1 FAILED"}:
+        lines = [
+            f"{summary.get('title', 'ANTIGRAVITY STEP 6S.1\nRUNTIME CONTEXT PROOF & FINAL TRUST CLOSURE')}",
+            "",
+            f"VERIFICATION MODE: {summary.get('verificationMode', 'SINGLE_MODEL_BLIND_CONTEXT_PROOF')}",
+            "",
+            "RUNTIME CONTEXT PROOF & ISOLATION:",
+        ]
+        for k, v in summary.get("runtimeContextProof", {}).items():
+            lines.append(f"{k}: {v}")
+        lines.append("")
+
+        lines.append("PYTHON CLEAN ENVIRONMENT ISOLATION:")
+        for k, v in summary.get("pythonCleanEnvIsolation", {}).items():
+            lines.append(f"{k}: {v}")
+        lines.append("")
+
+        lines.append("TRANSACTIONAL INSTALLER:")
+        for k, v in summary.get("transactionalInstaller", {}).items():
+            lines.append(f"{k}: {v}")
+        lines.append("")
+
+        lines.append("PREVIOUS TEST BASELINE:")
+        prev = summary.get("previousTestBaseline", summary.get("previousTests", {}))
+        for k, v in prev.items():
+            lines.append(f"{k}: {v}")
+        lines.append("")
+
+        lines.append("BLIND VERIFICATION ENGINE:")
+        for k, v in summary.get("blindVerification", {}).items():
+            lines.append(f"{k}: {v}")
+        lines.append("")
+
+        lines.append("COUNTEREXAMPLE AUDITOR:")
+        for k, v in summary.get("counterexampleAudit", {}).items():
+            lines.append(f"{k}: {v}")
+        lines.append("")
+
+        lines.append("HIDDEN VERIFICATION ENGINE:")
+        for k, v in summary.get("hiddenVerification", {}).items():
+            lines.append(f"{k}: {v}")
+        lines.append("")
+
+        lines.append("DETERMINISTIC EVIDENCE RESOLUTION:")
+        for k, v in summary.get("evidenceResolution", {}).items():
+            lines.append(f"{k}: {v}")
+        lines.append("")
+
+        lines.append("NEW STEP 6S.1 TESTS:")
+        for k, v in summary.get("newTests", {}).items():
+            lines.append(f"{k}: {v}")
+        lines.append("")
+
+        tt = summary.get("totalTests", {})
+        lines.extend([
+            "TOTAL TESTS:",
+            f"PASS: {tt.get('pass', 0)}",
+            f"FAIL: {tt.get('fail', 0)}",
+            "",
+        ])
+
+        torture = summary.get("tortureTest", {})
+        if torture:
+            lines.append("TORTURE PROJECT VERIFICATION:")
+            for k, v in torture.items():
+                lines.append(f"{k}: {v}")
+            lines.append("")
+
+        lines.append("HARD GUARANTEES:")
+        for g in summary.get("hardGuarantees", []):
+            lines.append(f"- {g}")
+        lines.append("")
+
+        lines.append("DETECTIVE GUARANTEES:")
+        for g in summary.get("detectiveGuarantees", []):
+            lines.append(f"- {g}")
+        lines.append("")
+
+        lines.append("SOFT GUARANTEES:")
+        for g in summary.get("softGuarantees", []):
+            lines.append(f"- {g}")
+        lines.append("")
+
+        lines.append("REAL LIMITATIONS:")
+        for l in summary.get("realLimitations", []):
+            lines.append(f"- {l}")
+        lines.append("")
+
+        lines.append(f"FINAL VERDICT: {summary.get('finalVerdict', 'STEP 6S.1 VERIFIED')}")
+        return "\n".join(lines)
+
     # Step 6S Format (6S.0)
     if version == "6S.0" or "blindVerification" in summary or summary.get("finalVerdict") in {"STEP 6S VERIFIED", "STEP 6S PARTIALLY VERIFIED", "STEP 6S FAILED"}:
         lines = [

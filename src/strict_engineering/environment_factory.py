@@ -13,7 +13,7 @@ import hashlib
 import tempfile
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple, Callable, Set
+from typing import Dict, Any, List, Optional, Tuple, Callable, Set, Union
 
 try:
     from . import kernel
@@ -26,6 +26,7 @@ EXCLUDED_CLEAN_DIRS = {
     "node_modules",
     "venv",
     ".venv",
+    ".clean_venv",
     "env",
     "target",
     "dist",
@@ -104,6 +105,44 @@ def reconstruct_clean_source(
     }
 
     return clean_dir, reconstruction_info
+
+
+def get_clean_venv_python(clean_dir: Path) -> Path:
+    """Returns path to Python executable inside clean environment venv if it exists, otherwise sys.executable."""
+    for venv_name in [".clean_venv", "venv", ".venv"]:
+        vdir = Path(clean_dir) / venv_name
+        if vdir.exists():
+            if sys.platform == "win32":
+                py_exe = vdir / "Scripts" / "python.exe"
+            else:
+                py_exe = vdir / "bin" / "python"
+            if py_exe.exists():
+                return py_exe
+    return Path(sys.executable)
+
+
+def create_scratch_virtualenv(clean_dir: Union[str, Path], without_pip: bool = False) -> Tuple[Path, str]:
+    """
+    Creates an isolated scratch virtual environment inside clean_dir / '.clean_venv'.
+    Returns (python_executable_path, status_message).
+    """
+    clean_dir = Path(clean_dir).resolve()
+    venv_dir = clean_dir / ".clean_venv"
+    if venv_dir.exists():
+        py_exe = get_clean_venv_python(clean_dir)
+        return py_exe, "Existing virtual environment found"
+
+    cmd = [sys.executable, "-m", "venv"]
+    if without_pip:
+        cmd.append("--without-pip")
+    cmd.append(str(venv_dir))
+
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if proc.returncode != 0:
+        raise RuntimeError(f"Failed to create virtual environment: {proc.stderr or proc.stdout}")
+
+    py_exe = get_clean_venv_python(clean_dir)
+    return py_exe, f"Virtual environment created at {venv_dir}"
 
 
 def restore_dependencies(
@@ -186,7 +225,8 @@ def restore_dependencies(
         restore_cmd = "dotnet restore --locked-mode"
         has_dep_config = True
     elif (clean_dir / "requirements.txt").exists():
-        restore_cmd = f"{sys.executable} -m pip install -r requirements.txt --dry-run"
+        py_exe, _ = create_scratch_virtualenv(clean_dir, without_pip=False)
+        restore_cmd = f'"{py_exe}" -m pip install -r requirements.txt'
         has_dep_config = True
     elif (clean_dir / "pyproject.toml").exists():
         has_dep_config = True
@@ -194,7 +234,8 @@ def restore_dependencies(
         try:
             content = (clean_dir / "pyproject.toml").read_text(encoding="utf-8")
             if "dependencies" in content:
-                restore_cmd = f"{sys.executable} -m pip install . --dry-run"
+                py_exe, _ = create_scratch_virtualenv(clean_dir, without_pip=False)
+                restore_cmd = f'"{py_exe}" -m pip install .'
         except Exception:
             pass
 
@@ -207,6 +248,20 @@ def restore_dependencies(
             "error": None,
             "stdout": "No external dependency configuration detected in project.",
             "stderr": "",
+            "frozen": frozen,
+            "origin": origin,
+            "executionType": "DEPENDENCY_RESTORE",
+        }
+
+    if restore_cmd and "--dry-run" in restore_cmd:
+        duration_ms = int((time.time() - start_time) * 1000)
+        return {
+            "status": "RESTORE_FAILED",
+            "exitCode": 1,
+            "durationMs": duration_ms,
+            "error": "DRY_RUN_REJECTED: --dry-run is forbidden from satisfying DEPENDENCY_RESTORE (REQ-009).",
+            "stdout": "",
+            "stderr": "DRY_RUN_FORBIDDEN",
             "frozen": frozen,
             "origin": origin,
             "executionType": "DEPENDENCY_RESTORE",
@@ -357,7 +412,7 @@ def build_from_scratch(
 
             source_hashes: Dict[str, str] = {}
             for root, dirs, files in os.walk(clean_dir):
-                dirs[:] = [d for d in dirs if d not in {".git", ".cache_scratch", "node_modules", ".venv", "__pycache__", "dist", "build", "out", "target"}]
+                dirs[:] = [d for d in dirs if d not in EXCLUDED_CLEAN_DIRS and not d.startswith(".cache")]
                 for f in files:
                     fp = Path(root) / f
                     try:
@@ -557,7 +612,13 @@ def run_clean_tests(
             except Exception:
                 pass
         elif (clean_dir / "tests").exists() or list(clean_dir.glob("test_*.py")):
-            cmd = f"{sys.executable} -m unittest discover -s . -p \"test_*.py\""
+            py_exe = get_clean_venv_python(clean_dir)
+            if py_exe == Path(sys.executable):
+                try:
+                    py_exe, _ = create_scratch_virtualenv(clean_dir, without_pip=True)
+                except Exception:
+                    py_exe = Path(sys.executable)
+            cmd = f'"{py_exe}" -m unittest discover -s . -p "test_*.py"'
         elif (clean_dir / "Cargo.toml").exists():
             cmd = "cargo test"
         elif (clean_dir / "go.mod").exists():
@@ -653,11 +714,29 @@ def verify_application_startup_and_runtime(
             except Exception:
                 pass
         elif (clean_dir / "app.py").exists():
-            cmd = f"{sys.executable} app.py"
+            py_exe = get_clean_venv_python(clean_dir)
+            if py_exe == Path(sys.executable):
+                try:
+                    py_exe, _ = create_scratch_virtualenv(clean_dir, without_pip=True)
+                except Exception:
+                    py_exe = Path(sys.executable)
+            cmd = f'"{py_exe}" app.py'
         elif (clean_dir / "main.py").exists():
-            cmd = f"{sys.executable} main.py"
+            py_exe = get_clean_venv_python(clean_dir)
+            if py_exe == Path(sys.executable):
+                try:
+                    py_exe, _ = create_scratch_virtualenv(clean_dir, without_pip=True)
+                except Exception:
+                    py_exe = Path(sys.executable)
+            cmd = f'"{py_exe}" main.py'
         elif (clean_dir / "server.py").exists():
-            cmd = f"{sys.executable} server.py"
+            py_exe = get_clean_venv_python(clean_dir)
+            if py_exe == Path(sys.executable):
+                try:
+                    py_exe, _ = create_scratch_virtualenv(clean_dir, without_pip=True)
+                except Exception:
+                    py_exe = Path(sys.executable)
+            cmd = f'"{py_exe}" server.py'
 
     if not cmd and not health_check_fn and not journey_fn:
         duration_ms = int((time.time() - start_time) * 1000)
@@ -786,6 +865,9 @@ def verify_application_startup_and_runtime(
         "origin": origin,
         "executionType": "RUNTIME_START",
     }
+
+
+execute_clean_runtime_startup = verify_application_startup_and_runtime
 
 
 def bootstrap_database_and_verify_migrations(

@@ -26,6 +26,7 @@ try:
     from . import counterexample_auditor
     from . import hidden_verification
     from . import evidence_resolution
+    from . import context_registry
 except (ImportError, ValueError):
     import kernel
     import fingerprint
@@ -40,6 +41,7 @@ except (ImportError, ValueError):
     import counterexample_auditor
     import hidden_verification
     import evidence_resolution
+    import context_registry
 
 PROTECTED_ARTIFACTS = {
     ".agent-harness/original-request.md",
@@ -48,6 +50,7 @@ PROTECTED_ARTIFACTS = {
     ".agent-harness/requirements.json",
     ".agent-harness/coverage.json",
     ".agent-harness/evidence.jsonl",
+    ".agent-harness/context-registry.jsonl",
     "docs/ACCEPTANCE_TESTS.md",
     ".agent-harness/independent-audit.json",
     ".agent-harness/disagreements.json",
@@ -360,6 +363,49 @@ def evaluate_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
         cx_file = kernel.get_harness_dir(workspace) / "counterexample-audit.json"
         hidden_file = kernel.get_harness_dir(workspace) / "hidden-checks.json"
         res_file = kernel.get_harness_dir(workspace) / "evidence-resolutions.json"
+
+        # Check Context Registry cryptographic integrity & pairwise isolation (Step 6S.1 REQ-005, REQ-007)
+        reg_valid, reg_errors = context_registry.verify_context_registry(workspace)
+        if not reg_valid:
+            unresolved_gates.append(f"Context Registry cryptographic chain broken/tampered: {', '.join(reg_errors)}")
+
+        builder_ctx = context_registry.get_registered_context_by_purpose(workspace, "BUILDER")
+        blind_ctx = context_registry.get_registered_context_by_purpose(workspace, "BLIND_FINAL_VERIFIER")
+        cx_ctx = context_registry.get_registered_context_by_purpose(workspace, "COUNTEREXAMPLE_AUDITOR")
+
+        builder_cid = (builder_ctx.get("conversationId") or "").strip().lower() if builder_ctx else ""
+        blind_cid = (blind_ctx.get("conversationId") or "").strip().lower() if blind_ctx else ""
+        cx_cid = (cx_ctx.get("conversationId") or "").strip().lower() if cx_ctx else ""
+
+        # Pairwise inequality checks
+        if blind_cid and builder_cid and blind_cid == builder_cid:
+            unresolved_gates.append(f"Context Reuse Detected (CONTEXT_REUSED): Blind Verifier conversation ID matches Builder ({blind_cid})")
+
+        if cx_cid and builder_cid and cx_cid == builder_cid:
+            unresolved_gates.append(f"Context Reuse Detected (CONTEXT_REUSED): Counterexample Auditor conversation ID matches Builder ({cx_cid})")
+
+        if cx_cid and blind_cid and cx_cid == blind_cid:
+            unresolved_gates.append(f"Context Reuse Detected (CONTEXT_REUSED): Counterexample Auditor conversation ID matches Blind Verifier ({cx_cid})")
+
+        # Check if HIGH or CRITICAL requirements exist
+        has_high_or_critical = any(
+            (r.get("risk", {}).get("level") in {"HIGH", "CRITICAL"} or r.get("riskLevel") in {"HIGH", "CRITICAL"})
+            for r in reqs
+        )
+
+        allow_sim = bool(state.get("allowSimulatedContext", False))
+        if has_high_or_critical and ind_audit_mandatory:
+            blind_iso, _ = context_registry.evaluate_context_isolation(
+                workspace, "BLIND_FINAL_VERIFIER", ["BUILDER"], allow_simulated=allow_sim
+            )
+            if blind_iso != "FRESH_CONTEXT_VERIFIED" and not (allow_sim and blind_iso == "FRESH_CONTEXT_SIMULATED"):
+                unresolved_gates.append(f"Blind Verifier context isolation not proven for HIGH/CRITICAL requirements ({blind_iso})")
+
+            cx_iso, _ = context_registry.evaluate_context_isolation(
+                workspace, "COUNTEREXAMPLE_AUDITOR", ["BUILDER", "BLIND_FINAL_VERIFIER"], allow_simulated=allow_sim
+            )
+            if cx_iso != "FRESH_CONTEXT_VERIFIED" and not (allow_sim and cx_iso == "FRESH_CONTEXT_SIMULATED"):
+                unresolved_gates.append(f"Counterexample Auditor context isolation not proven for HIGH/CRITICAL requirements ({cx_iso})")
 
         # Check Blind Verification
         if blind_file.exists() or ind_audit_mandatory:

@@ -1,12 +1,13 @@
 """
 Strict Engineering Kernel V5.1 - Antigravity Hooks CLI Entrypoint
 Handles stdin JSON payloads from PreToolUse, PreInvocation, and Stop events,
-executes policy gates, and writes valid JSON to stdout.
+executes policy gates, records Antigravity runtime context metadata, and writes valid JSON to stdout.
 Enforces fail-closed security for tool gates and completion protection.
 """
 
 import sys
 import json
+import os
 import traceback
 from pathlib import Path
 
@@ -15,6 +16,7 @@ sys.path.insert(0, str(Path(__file__).parent.resolve()))
 
 import kernel
 import gate
+import context_registry
 
 
 def main():
@@ -36,12 +38,39 @@ def main():
         payload = {}
 
     try:
+        workspace = gate.resolve_workspace(payload)
+
+        # Ingest authoritative runtime context metadata if present
+        conv_id = (
+            payload.get("conversationId")
+            or payload.get("conversation_id")
+            or payload.get("conversationID")
+        )
+        if workspace and conv_id and kernel.is_harness_active(workspace):
+            purpose = (
+                payload.get("contextPurpose")
+                or payload.get("role")
+                or os.environ.get("STRICT_ENGINEERING_ROLE")
+                or "BUILDER"
+            )
+            origin = payload.get("origin") or "ANTIGRAVITY_RUNTIME_HOOK"
+            task_id = payload.get("taskId") or "TASK-STEP6S1"
+            try:
+                context_registry.register_runtime_context(
+                    workspace_dir=workspace,
+                    hook_payload=payload,
+                    context_purpose=purpose,
+                    origin=origin,
+                    task_id=task_id,
+                )
+            except Exception as reg_err:
+                sys.stderr.write(f"[Strict-Engineering-Hook] Context registration notice: {reg_err}\n")
+
         if action in {"pre-tool", "pretooluse", "pre_tool", "pre_tool_use"}:
             result = gate.evaluate_pre_tool_use(payload)
             print(json.dumps(result))
 
         elif action in {"pre-invocation", "preinvocation", "pre_invocation"}:
-            workspace = gate.resolve_workspace(payload)
             if workspace and kernel.is_harness_active(workspace):
                 state = kernel.load_state(workspace)
                 phase = state.get("phase", "ACTIVE")

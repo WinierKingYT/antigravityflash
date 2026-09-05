@@ -25,11 +25,13 @@ try:
     from . import fingerprint
     from . import baseline
     from . import blind_verifier
+    from . import context_registry
 except (ImportError, ValueError):
     import kernel
     import fingerprint
     import baseline
     import blind_verifier
+    import context_registry
 
 
 def compile_counterexample_packet(
@@ -105,7 +107,30 @@ def compile_counterexample_packet(
     diff_text = blind_verifier.sanitize_text(candidate_diff or "")
     cand_fp = fingerprint.compute_workspace_fingerprint(ws)
 
-    context_isolation = "FRESH_CONTEXT" if is_fresh_context else "NOT_PROVEN"
+    # Authoritative context isolation evaluation from context_registry (Step 6S.1)
+    allow_simulated = bool(kwargs.get("allow_simulated", False))
+    iso_status, iso_details = context_registry.evaluate_context_isolation(
+        ws,
+        verifier_purpose="COUNTEREXAMPLE_AUDITOR",
+        predecessor_purposes=["BUILDER", "BLIND_FINAL_VERIFIER"],
+        allow_simulated=allow_simulated,
+    )
+    auditor_ctx = context_registry.get_registered_context_by_purpose(ws, "COUNTEREXAMPLE_AUDITOR")
+    if auditor_ctx and iso_status == "FRESH_CONTEXT_VERIFIED":
+        runtime_conversation_id = auditor_ctx.get("conversationId", "")
+        context_reg_event_id = auditor_ctx.get("contextEventId", "")
+        context_proof_hash = auditor_ctx.get("eventHash", "")
+        context_isolation = "FRESH_CONTEXT_VERIFIED"
+    elif auditor_ctx and allow_simulated and auditor_ctx.get("origin") in {"MOCK", "SIMULATED_INTEGRATION"}:
+        runtime_conversation_id = auditor_ctx.get("conversationId", "")
+        context_reg_event_id = auditor_ctx.get("contextEventId", "")
+        context_proof_hash = auditor_ctx.get("eventHash", "")
+        context_isolation = "FRESH_CONTEXT_SIMULATED"
+    else:
+        runtime_conversation_id = ""
+        context_reg_event_id = ""
+        context_proof_hash = ""
+        context_isolation = iso_status
 
     # Minimal execution evidence only (sanitized, stripped of claims/verdicts)
     evidence_file = harness / "evidence.jsonl"
@@ -131,6 +156,9 @@ def compile_counterexample_packet(
     bundle_payload = {
         "taskId": task_id,
         "contextId": context_id,
+        "runtimeConversationId": runtime_conversation_id,
+        "contextRegistryEventId": context_reg_event_id,
+        "contextProofHash": context_proof_hash,
         "contextIsolation": context_isolation,
         "requirementIds": req_ids,
         "candidateFingerprint": cand_fp,
@@ -161,6 +189,8 @@ You are an independent, adversarial Counterexample Auditor operating in a separa
 Model: Gemini Pro.
 Role: COUNTEREXAMPLE_AUDITOR.
 Context Isolation: {context_isolation}
+Runtime Conversation ID: {runtime_conversation_id or '[UNPROVEN]'}
+Context Proof Hash: {context_proof_hash or '[UNPROVEN]'}
 
 AUDIT OBJECTIVE:
 Can you construct a concrete counterexample that breaks a claimed requirement or invariant?
@@ -235,6 +265,9 @@ You MUST return ONLY a valid, parseable JSON object adhering to Schema 6S.0 with
         "auditId": audit_id,
         "taskId": task_id,
         "contextId": context_id,
+        "runtimeConversationId": runtime_conversation_id,
+        "contextRegistryEventId": context_reg_event_id,
+        "contextProofHash": context_proof_hash,
         "contextIsolation": context_isolation,
         "requirementIds": req_ids,
         "candidateFingerprint": cand_fp,
@@ -254,6 +287,9 @@ def validate_counterexample_response(
     expected_packet_hash: Any,
     expected_audit_id: Optional[str] = None,
     expected_fingerprint: Optional[str] = None,
+    expected_conversation_id: Optional[str] = None,
+    disallowed_conversation_ids: Optional[List[str]] = None,
+    expected_context_proof_hash: Optional[str] = None,
 ) -> Tuple[bool, Dict[str, Any], str]:
     """
     Validates Schema 6S.0 structured JSON response from Counterexample Auditor.
@@ -295,6 +331,17 @@ def validate_counterexample_response(
 
     if expected_fingerprint and data.get("candidateFingerprint") != expected_fingerprint:
         return False, data, f"AUDIT_INVALID: Candidate fingerprint mismatch (expected {expected_fingerprint}, got {data.get('candidateFingerprint')})"
+
+    resp_cid = data.get("conversationId") or data.get("runtimeConversationId")
+    if resp_cid:
+        if disallowed_conversation_ids and any(resp_cid == d_cid for d_cid in disallowed_conversation_ids):
+            return False, data, f"AUDIT_INVALID: Verdict generated in Builder/Verifier/disallowed context '{resp_cid}'"
+        if expected_conversation_id and resp_cid != expected_conversation_id:
+            return False, data, f"AUDIT_INVALID: conversationId mismatch (expected {expected_conversation_id}, got {resp_cid})"
+
+    resp_cph = data.get("contextProofHash")
+    if expected_context_proof_hash and resp_cph and resp_cph != expected_context_proof_hash:
+        return False, data, f"AUDIT_INVALID: contextProofHash mismatch (expected {expected_context_proof_hash}, got {resp_cph})"
 
     allowed_verdicts = {"NO_COUNTEREXAMPLE_FOUND", "COUNTEREXAMPLE_FOUND", "INSUFFICIENT_EVIDENCE"}
     verdict = data.get("verdict") or data.get("overallVerdict")
@@ -348,11 +395,15 @@ def invoke_counterexample_auditor(
                     "createdAt": created_at
                 }
 
+            expected_cid = packet.get("runtimeConversationId") or None
+            expected_cph = packet.get("contextProofHash") or None
             is_valid, parsed_data, verdict = validate_counterexample_response(
                 raw_stdout,
                 expected_packet_hash=packet["packetHash"],
                 expected_audit_id=packet["auditId"],
                 expected_fingerprint=packet["candidateFingerprint"],
+                expected_conversation_id=expected_cid,
+                expected_context_proof_hash=expected_cph,
             )
 
             return {
@@ -364,7 +415,10 @@ def invoke_counterexample_auditor(
                 "overallVerdict": verdict if is_valid else "INSUFFICIENT_EVIDENCE",
                 "role": "COUNTEREXAMPLE_AUDITOR",
                 "model": parsed_data.get("model", runner_model),
-                "contextIsolation": packet.get("contextIsolation", "FRESH_CONTEXT"),
+                "contextIsolation": packet.get("contextIsolation", "NOT_PROVEN"),
+                "runtimeConversationId": packet.get("runtimeConversationId", ""),
+                "contextRegistryEventId": packet.get("contextRegistryEventId", ""),
+                "contextProofHash": packet.get("contextProofHash", ""),
                 "counterexamples": parsed_data.get("counterexamples", []),
                 "findings": parsed_data.get("findings", []),
                 "durationSec": round(duration, 3),
@@ -407,11 +461,15 @@ def invoke_counterexample_auditor(
                 "createdAt": created_at
             }
 
+        expected_cid = packet.get("runtimeConversationId") or None
+        expected_cph = packet.get("contextProofHash") or None
         is_valid, parsed_data, verdict = validate_counterexample_response(
             proc.stdout,
             expected_packet_hash=packet["packetHash"],
             expected_audit_id=packet["auditId"],
-            expected_fingerprint=packet["candidateFingerprint"]
+            expected_fingerprint=packet["candidateFingerprint"],
+            expected_conversation_id=expected_cid,
+            expected_context_proof_hash=expected_cph,
         )
 
         return {
@@ -422,7 +480,10 @@ def invoke_counterexample_auditor(
             "verdict": verdict if is_valid else "AUDIT_INVALID",
             "role": "COUNTEREXAMPLE_AUDITOR",
             "model": parsed_data.get("model", {"family": "gemini", "slug": model_slug}),
-            "contextIsolation": packet.get("contextIsolation", "FRESH_CONTEXT"),
+            "contextIsolation": packet.get("contextIsolation", "NOT_PROVEN"),
+            "runtimeConversationId": packet.get("runtimeConversationId", ""),
+            "contextRegistryEventId": packet.get("contextRegistryEventId", ""),
+            "contextProofHash": packet.get("contextProofHash", ""),
             "counterexamples": parsed_data.get("counterexamples", []),
             "findings": parsed_data.get("findings", []),
             "durationSec": round(duration, 3),

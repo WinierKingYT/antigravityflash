@@ -189,7 +189,7 @@ def create_decision(
     src_ref = kwargs.get("sourceReference", kwargs.get("source_reference", source_reference)) or f"concern:{concern_id}"
     super_by = kwargs.get("supersededBy", kwargs.get("superseded_by", superseded_by))
 
-    return {
+    d_dict = {
         "id": str(dec_id).strip(),
         "concernId": str(concern_id).strip(),
         "question": str(q).strip(),
@@ -210,6 +210,13 @@ def create_decision(
         "createdAt": created_at or utc_now_iso(),
         "supersededBy": str(super_by).strip() if super_by else None,
     }
+    gen_req = kwargs.get("generatesRequirements", kwargs.get("generates_requirements"))
+    if gen_req is not None:
+        d_dict["generatesRequirements"] = bool(gen_req)
+    num_req = kwargs.get("numberOfRequirements", kwargs.get("number_of_requirements"))
+    if num_req is not None:
+        d_dict["numberOfRequirements"] = int(num_req)
+    return d_dict
 
 
 def supersede_decision(
@@ -336,16 +343,34 @@ def _parse_user_response_impl(
         r"\b(?:none\s+of\s+these|neither(?:\s+one)?|no\s+to\s+all|none\s+of\s+the\s+above|reject\s+all|neither\s+option|nothing\s+above|disagree\s+with\s+all|none)\b",
     ]
     for pat in rejection_patterns:
-        if re.search(pat, norm):
+        m = re.search(pat, norm)
+        if m:
+            custom_alternative = None
+            after_text = cleaned[m.end():].strip(" ,;:-.")
+            # Check if there is an explicit directive / proposal in after_text
+            # e.g., ", use X instead", "; let's go with Y", "prefer Z", "instead use X"
+            directive_match = re.search(
+                r"(?:^|[;,:\-\s]+)(?:(?:instead|please|just|let'?s|i\s+want|we\s+should|rather)\s+)?(?:use|prefer|go\s+with|do|implement|store\s+in|choose|select)\s+([^,;.\n]+)",
+                after_text,
+                re.IGNORECASE,
+            )
+            if directive_match:
+                cand = directive_match.group(1).strip(" ,;:-.")
+                cand = re.sub(r"\b(?:instead|please)\b", "", cand, flags=re.IGNORECASE).strip(" ,;:-.")
+                if len(cand) >= 2 and not re.match(r"^(?:options?|of\s+these|them|any)$", cand, re.IGNORECASE):
+                    custom_alternative = cand
+
             return {
                 "status": "REJECTED",
-                "selectedOption": None,
+                "selectedOption": custom_alternative,
+                "customAlternative": custom_alternative,
+                "hasCustomAlternative": bool(custom_alternative),
                 "optionIndex": None,
                 "authority": "USER",
                 "confidence": 1.0,
                 "rawInput": cleaned,
                 "intent": "REJECTION",
-                "parsedText": "User rejected all candidate options.",
+                "parsedText": f"User rejected options" + (f" with custom alternative: '{custom_alternative}'" if custom_alternative else "."),
                 "matchedCriteria": "REJECTION_KEYWORD",
             }
 

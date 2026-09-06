@@ -103,7 +103,7 @@ class TestStep7PackageC(unittest.TestCase):
             {
                 "id": "CONC-001",
                 "status": "ACTIVE",
-                "riskLevel": "HIGH",
+                "riskLevel": "MEDIUM",
                 "uncertainty": 0.9,
                 "downstreamImpact": 0.9,
                 "expectedDiscrimination": 0.9,
@@ -116,27 +116,66 @@ class TestStep7PackageC(unittest.TestCase):
         self.assertFalse(status["canProceedToSpec"])
         self.assertIn("unresolved concerns remain with highest utility", status["reason"])
 
-    def test_stopping_engine_session_fatigue_limit(self):
+    def test_stopping_engine_unresolved_high_risk_blocks(self):
         concerns = [
             {
                 "id": "CONC-001",
                 "status": "ACTIVE",
-                "riskLevel": "MEDIUM",
-                "uncertainty": 0.8,
-                "downstreamImpact": 0.8,
+                "riskLevel": "HIGH",
+                "uncertainty": 0.1,
+                "downstreamImpact": 0.1,
                 "isBlocking": False,
             }
         ]
-        # Simulate 15 asked questions
+        status = stopping_engine.evaluate_stopping_conditions(concerns, threshold=0.35)
+        self.assertFalse(status["canProceedToSpec"])
+        self.assertIn("CONC-001", status["blockingConcerns"])
+        self.assertIn("Unresolved blocking/critical concerns remain", status["reason"])
+
+    def test_stopping_engine_session_fatigue_limit(self):
+        # Case 1: Fatigue reached and remaining concern has high utility -> PAUSES with SESSION_QUESTION_BUDGET_REACHED
+        concerns_high = [
+            {
+                "id": "CONC-001",
+                "status": "ACTIVE",
+                "riskLevel": "MEDIUM",
+                "uncertainty": 0.9,
+                "downstreamImpact": 0.9,
+                "questionCost": 0.1,
+                "userEffort": 0.1,
+                "isBlocking": False,
+            }
+        ]
         fake_asked = [{"question": f"Q{i}", "topic": "T"} for i in range(15)]
-        status = stopping_engine.evaluate_stopping_conditions(
-            concerns,
+        status_high = stopping_engine.evaluate_stopping_conditions(
+            concerns_high,
             asked_questions=fake_asked,
             max_questions=15,
         )
-        self.assertTrue(status["canProceedToSpec"])
-        self.assertTrue(status["stoppingConditionsMet"]["sessionFatigueReached"])
-        self.assertIn("Session fatigue limit reached", status["reason"])
+        self.assertFalse(status_high["canProceedToSpec"])
+        self.assertEqual(status_high["reason"], "SESSION_QUESTION_BUDGET_REACHED")
+
+        # Case 2: Fatigue reached and all remaining concerns have low utility -> allows proceed
+        concerns_low = [
+            {
+                "id": "CONC-002",
+                "status": "ACTIVE",
+                "riskLevel": "LOW",
+                "uncertainty": 0.1,
+                "downstreamImpact": 0.1,
+                "expectedDiscrimination": 0.1,
+                "questionCost": 0.9,
+                "userEffort": 0.9,
+                "isBlocking": False,
+            }
+        ]
+        status_low = stopping_engine.evaluate_stopping_conditions(
+            concerns_low,
+            asked_questions=fake_asked,
+            max_questions=15,
+        )
+        self.assertTrue(status_low["canProceedToSpec"])
+        self.assertTrue(status_low["stoppingConditionsMet"]["sessionFatigueReached"])
 
     def test_stopping_engine_invalid_graph_blocks_spec(self):
         # Create an invalid cyclic graph

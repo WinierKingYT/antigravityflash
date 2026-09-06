@@ -7,6 +7,7 @@ with atomic persistence, strict schema validation, and heuristic requirement dis
 import os
 import re
 import json
+import hashlib
 import datetime
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Tuple, Union
@@ -77,6 +78,7 @@ def create_initial_frame(
     assumptions: Optional[List[Union[Dict[str, str], str]]] = None,
     source_references: Optional[List[str]] = None,
     success_definition: Optional[List[Union[Dict[str, str], str]]] = None,
+    intents: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """
     Construct a canonical Structured Project Frame dict conforming to schemaVersion "7.0".
@@ -102,6 +104,62 @@ def create_initial_frame(
     norm_constraints = norm_list(explicit_constraints, "EXPLICIT_USER_STATEMENT")
     norm_nongoals = norm_list(explicit_non_goals, "EXPLICIT_USER_STATEMENT")
 
+    # Canonical INTENT Model (INTENT-001, INTENT-002, ...)
+    canonical_intents: List[Dict[str, Any]] = []
+    if intents is not None:
+        for idx, item in enumerate(intents, 1):
+            if isinstance(item, dict):
+                iid = str(item.get("id") or f"INTENT-{str(idx).zfill(3)}")
+                itext = str(item.get("text", "")).strip()
+                icat = str(item.get("category", "GOAL")).upper()
+                iprov = str(item.get("provenance", "EXPLICIT_USER_STATEMENT"))
+                shash = item.get("statementHash") or hashlib.sha256(itext.encode("utf-8")).hexdigest()
+                canonical_intents.append({
+                    "id": iid,
+                    "text": itext,
+                    "category": icat,
+                    "provenance": iprov,
+                    "order": idx,
+                    "statementHash": shash,
+                })
+    else:
+        # Automatically generate canonical intents from goals, constraints, non-goals
+        c_idx = 1
+        if cleaned_goal:
+            canonical_intents.append({
+                "id": f"INTENT-{str(c_idx).zfill(3)}",
+                "text": cleaned_goal,
+                "category": "GOAL",
+                "provenance": "EXPLICIT_USER_STATEMENT",
+                "order": c_idx,
+                "statementHash": hashlib.sha256(cleaned_goal.encode("utf-8")).hexdigest(),
+            })
+            c_idx += 1
+        for c_entry in norm_constraints:
+            c_txt = c_entry.get("text", "").strip()
+            if c_txt:
+                canonical_intents.append({
+                    "id": f"INTENT-{str(c_idx).zfill(3)}",
+                    "text": c_txt,
+                    "category": "CONSTRAINT",
+                    "provenance": c_entry.get("provenance", "EXPLICIT_USER_STATEMENT"),
+                    "order": c_idx,
+                    "statementHash": hashlib.sha256(c_txt.encode("utf-8")).hexdigest(),
+                })
+                c_idx += 1
+        for ng_entry in norm_nongoals:
+            ng_txt = ng_entry.get("text", "").strip()
+            if ng_txt:
+                canonical_intents.append({
+                    "id": f"INTENT-{str(c_idx).zfill(3)}",
+                    "text": ng_txt,
+                    "category": "NON_GOAL",
+                    "provenance": ng_entry.get("provenance", "EXPLICIT_USER_STATEMENT"),
+                    "order": c_idx,
+                    "statementHash": hashlib.sha256(ng_txt.encode("utf-8")).hexdigest(),
+                })
+                c_idx += 1
+
     return {
         "schemaVersion": SCHEMA_VERSION,
         "projectGoal": cleaned_goal,
@@ -113,6 +171,7 @@ def create_initial_frame(
         "explicitNonGoals": norm_nongoals,
         "nonGoals": norm_nongoals,
         "goals": [cleaned_goal] if cleaned_goal else [],
+        "intents": canonical_intents,
         "knownFacts": norm_list(known_facts, "EXPLICIT_USER_STATEMENT"),
         "unknowns": norm_list(unknowns, "MODEL_HYPOTHESIS"),
         "assumptions": norm_list(assumptions, "SAFE_INFERENCE"),
@@ -207,7 +266,25 @@ def validate_frame(frame_data: Dict[str, Any]) -> Tuple[bool, List[str]]:
             if not isinstance(r, str):
                 errors.append(f"Field 'sourceReferences[{idx}]' must be a string.")
 
-    # 5. updatedAt
+    # 5. intents validation (if present)
+    intents_list = frame_data.get("intents")
+    if intents_list is not None:
+        if not isinstance(intents_list, list):
+            errors.append("Field 'intents' must be a list of intent objects.")
+        else:
+            for idx, it in enumerate(intents_list):
+                if not isinstance(it, dict):
+                    errors.append(f"Field 'intents[{idx}]' must be a dictionary.")
+                    continue
+                if not it.get("id") or not str(it.get("id")).startswith("INTENT-"):
+                    errors.append(f"Field 'intents[{idx}].id' must start with 'INTENT-'.")
+                if not it.get("text") or not str(it.get("text")).strip():
+                    errors.append(f"Field 'intents[{idx}].text' must be a non-empty string.")
+                shash = str(it.get("statementHash", ""))
+                if len(shash) != 64 or not all(c in "0123456789abcdefABCDEF" for c in shash):
+                    errors.append(f"Field 'intents[{idx}].statementHash' must be a valid 64-character SHA-256 hex string.")
+
+    # 6. updatedAt
     updated_at = frame_data.get("updatedAt")
     if not isinstance(updated_at, str) or not updated_at.strip():
         errors.append("Field 'updatedAt' must be an ISO timestamp string.")
@@ -416,7 +493,8 @@ def extract_frame_from_raw_request(original_intent: str) -> Dict[str, Any]:
         for text in section_map["assumptions"]
     ]
 
-    source_references = [f"original_intent_sha256:{len(raw_text)}chars"]
+    raw_hash = hashlib.sha256(raw_text.encode("utf-8")).hexdigest()
+    source_references = [f"sha256:{raw_hash}"]
 
     return create_initial_frame(
         project_goal=project_goal,
@@ -430,6 +508,30 @@ def extract_frame_from_raw_request(original_intent: str) -> Dict[str, Any]:
         source_references=source_references,
         success_definition=success_def,
     )
+
+
+def get_intents(frame_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Return the list of canonical intents from the frame."""
+    return (frame_data or {}).get("intents", [])
+
+
+def get_intent_by_id(frame_data: Dict[str, Any], intent_id: str) -> Optional[Dict[str, Any]]:
+    """Lookup a canonical intent by its ID."""
+    for it in get_intents(frame_data):
+        if it.get("id") == intent_id:
+            return it
+    return None
+
+
+def find_intents_for_text(frame_data: Dict[str, Any], search_text: str) -> List[Dict[str, Any]]:
+    """Find intents matching text substring or semantic tokens."""
+    matches = []
+    norm_search = str(search_text).lower()
+    for it in get_intents(frame_data):
+        it_text = str(it.get("text", "")).lower()
+        if norm_search in it_text or it_text in norm_search:
+            matches.append(it)
+    return matches
 
 
 # Canonical alias for Step 7 discovery orchestration

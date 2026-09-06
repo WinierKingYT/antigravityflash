@@ -279,22 +279,133 @@ class DecisionEngine:
         # Parse user response
         parse_res = decision_mod.parse_user_response(user_response, candidate_opts)
         
-        # Check if user rejected or requested custom
-        chosen_text = parse_res.get("value")
-        if parse_res.get("type") == "REJECTION":
-            chosen_text = f"Rejected: {user_response}"
-        elif parse_res.get("type") == "DELEGATION":
-            rec_opt = next((o for o in candidate_opts if o.get("isRecommended")), candidate_opts[0] if candidate_opts else {})
-            chosen_text = rec_opt.get("title", "Recommended Default")
+        parse_type = str(parse_res.get("type") or parse_res.get("intent") or "").upper()
+        parse_status = str(parse_res.get("status") or "").upper()
+
+        # 1. Uncertainty Check
+        if parse_status == "UNCERTAIN" or parse_type in ("UNCERTAIN", "UNCERTAINTY"):
+            # Never create a decision, never resolve concern
+            decision_events.record_decision_event(
+                workspace_dir=self.ws,
+                event_type="USER_UNCERTAINTY_RECORDED",
+                payload={
+                    "concernId": concern_id,
+                    "rawInput": user_response,
+                    "action": "UNCERTAINTY_PRESERVED",
+                },
+                actor=actor,
+            )
+            graph_data = decision_graph.sync_decision_graph(self.ws)
+            status_data = stopping_engine.sync_decision_status(self.ws)
+            cov_data = decision_coverage.sync_decision_coverage(self.ws)
+
+            return {
+                "action": "UNCERTAINTY_PRESERVED",
+                "concernId": concern_id,
+                "message": f"User expressed uncertainty on '{target_concern.get('title')}'. Concern remains unresolved without hallucinating a decision.",
+                "parseResult": parse_res,
+                "status": status_data,
+                "coverage": cov_data,
+                "graph": graph_data,
+            }
+
+        # 2. Rejection Check
+        if parse_status == "REJECTED" or parse_type == "REJECTION":
+            custom_alt = parse_res.get("customAlternative")
+            has_custom = bool(custom_alt and isinstance(custom_alt, str) and len(custom_alt.strip()) >= 2)
+
+            if not has_custom:
+                # Bare rejection without alternative: do NOT create decision, do NOT resolve concern
+                decision_events.record_decision_event(
+                    workspace_dir=self.ws,
+                    event_type="USER_REJECTION_RECORDED",
+                    payload={
+                        "concernId": concern_id,
+                        "rawInput": user_response,
+                        "hasCustomAlternative": False,
+                    },
+                    actor=actor,
+                )
+                graph_data = decision_graph.sync_decision_graph(self.ws)
+                status_data = stopping_engine.sync_decision_status(self.ws)
+                cov_data = decision_coverage.sync_decision_coverage(self.ws)
+
+                return {
+                    "action": "REJECTION_RECORDED",
+                    "concernId": concern_id,
+                    "message": f"User rejected all candidate options for '{target_concern.get('title')}' without an alternative. Concern remains unresolved.",
+                    "parseResult": parse_res,
+                    "status": status_data,
+                    "coverage": cov_data,
+                    "graph": graph_data,
+                }
+            else:
+                # User rejected candidate options but provided a custom alternative
+                chosen_text = str(custom_alt).strip()
+                authority = "USER"
+                decision_type = "USER_EXPLICIT"
+                tradeoffs = ["User specified custom alternative outside predefined candidate options"]
+                rationale = f"User rejected candidate options and specified custom alternative: {chosen_text}"
+
+        # 3. Delegation Check
+        elif parse_status == "DELEGATED" or parse_type == "DELEGATION":
+            risk = str(target_concern.get("riskLevel", "LOW")).upper()
+            cat = str(target_concern.get("category", "")).upper()
+            is_high_risk = (risk in ("CRITICAL", "HIGH")) or (cat in ("AUTHORIZATION", "SECURITY", "FINANCIAL", "IRREVERSIBILITY", "RECOVERY"))
+
+            if is_high_risk:
+                # Cannot silently resolve high-risk concern via delegation
+                decision_events.record_decision_event(
+                    workspace_dir=self.ws,
+                    event_type="DELEGATION_RESTRICTED_HIGH_RISK",
+                    payload={
+                        "concernId": concern_id,
+                        "riskLevel": risk,
+                        "category": cat,
+                        "rawInput": user_response,
+                    },
+                    actor=actor,
+                )
+                graph_data = decision_graph.sync_decision_graph(self.ws)
+                status_data = stopping_engine.sync_decision_status(self.ws)
+                cov_data = decision_coverage.sync_decision_coverage(self.ws)
+
+                return {
+                    "action": "DELEGATION_RESTRICTED",
+                    "concernId": concern_id,
+                    "riskLevel": risk,
+                    "message": f"Cannot delegate {risk}-risk architectural concern '{target_concern.get('title')}' without explicit user confirmation.",
+                    "parseResult": parse_res,
+                    "status": status_data,
+                    "coverage": cov_data,
+                    "graph": graph_data,
+                }
+            else:
+                authority = "USER_DELEGATED"
+                decision_type = "USER_EXPLICIT"
+                rec_opt = next((o for o in candidate_opts if o.get("isRecommended")), candidate_opts[0] if candidate_opts else {})
+                chosen_text = rec_opt.get("title", "Recommended Default")
+                tradeoffs = [f"Agent recommended option under user delegation: {chosen_text}"]
+                rationale = f"User explicitly delegated decision authority: {user_response}"
+
+        # 4. Standard Selection / Free Text
+        else:
+            authority = "USER"
+            decision_type = "USER_EXPLICIT"
+            chosen_text = str(parse_res.get("value") or parse_res.get("matchedOptionTitle") or user_response).strip()
+            tradeoffs = [f"User selected: {parse_res.get('matchedOptionTitle', chosen_text)}"]
+            rationale = f"User response: {user_response}"
 
         # Create decision
         dec_data = decision_mod.create_decision(
             concern_id=concern_id,
             title=f"Decision for {target_concern.get('title')}",
             chosen_option=str(chosen_text),
-            authority="USER_DIRECT",
-            tradeoffs=[f"User selected: {parse_res.get('matchedOptionTitle', chosen_text)}"],
-            rationale=f"User response: {user_response}",
+            authority=authority,
+            decision_type=decision_type,
+            tradeoffs=tradeoffs,
+            rationale=rationale,
+            risk_level=str(target_concern.get("riskLevel", "LOW")),
         )
 
         decisions_list = decision_mod.load_decisions(self.ws)
@@ -316,7 +427,9 @@ class DecisionEngine:
                 "decisionId": dec_data["id"],
                 "concernId": concern_id,
                 "chosenOption": chosen_text,
-                "parseType": parse_res.get("type"),
+                "authority": authority,
+                "decisionType": decision_type,
+                "parseType": parse_type,
                 "confidence": parse_res.get("confidence"),
             },
             actor=actor,
@@ -439,11 +552,11 @@ class DecisionEngine:
 
         return invalidated
 
-    def transition_to_specification(self, force: bool = False) -> Tuple[bool, str, List[Dict[str, Any]]]:
+    def transition_to_specification(self) -> Tuple[bool, str, List[Dict[str, Any]]]:
         """
         Execute the DISCOVERY -> SPECIFICATION gate and compile requirements.
         """
-        return requirement_generator.compile_requirements_from_decisions(self.ws, force=force)
+        return requirement_generator.compile_requirements_from_decisions(self.ws)
 
     def review_consistency(self) -> Tuple[bool, List[Dict[str, Any]]]:
         """

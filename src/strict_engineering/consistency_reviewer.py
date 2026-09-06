@@ -284,6 +284,52 @@ def review_decision_consistency(
                         "recommendation": "Verify whether this decision is in scope with original project goals.",
                     })
 
+    # 6. INVALID RESOLUTION CHECK (UNCERTAIN / REJECTION CANNOT RESOLVE)
+    for c in c_list:
+        cid = c.get("id", "UNKNOWN")
+        c_status = str(c.get("status", "")).upper()
+        if c_status == "RESOLVED":
+            if c.get("category") != "NON_GOAL":
+                chosen_dec_id = c.get("chosenDecisionId")
+                if not chosen_dec_id:
+                    resolving_decs = [d for d in active_decisions if d.get("concernId") == cid]
+                    if not resolving_decs:
+                        issues.append({
+                            "code": "UNRESOLVED_LINKAGE",
+                            "severity": "BLOCKING",
+                            "message": f"Concern {cid} is marked RESOLVED but has no chosenDecisionId or active resolving decision.",
+                            "affectedNodes": [cid],
+                            "recommendation": "Link concern to a valid confirmed decision or reset status to UNRESOLVED.",
+                        })
+                elif chosen_dec_id in d_map:
+                    dec = d_map[chosen_dec_id]
+                    opt = str(dec.get("chosenOption", "")).lower()
+                    if opt.startswith("rejected:") or opt in ("none", "uncertain", "rejected"):
+                        issues.append({
+                            "code": "INVALID_DECISION_RESOLUTION",
+                            "severity": "BLOCKING",
+                            "message": f"Concern {cid} is marked RESOLVED by decision {chosen_dec_id} with invalid rejection/uncertainty value '{opt}'.",
+                            "affectedNodes": [cid, chosen_dec_id],
+                            "recommendation": "Do not mark concern resolved by a rejection or uncertainty.",
+                        })
+
+    # 7. HIGH-RISK DELEGATION AUDIT
+    for d in active_decisions:
+        did = d.get("id", "UNKNOWN")
+        auth = str(d.get("authority", "")).upper()
+        cid = d.get("concernId")
+        associated_concern = c_map.get(cid, {}) if cid else {}
+        risk = str(associated_concern.get("riskLevel", "")).upper()
+        cat = str(associated_concern.get("category", "")).upper()
+        if auth == "USER_DELEGATED" and (risk in ("CRITICAL", "HIGH") or cat in ("AUTHORIZATION", "SECURITY", "FINANCIAL", "IRREVERSIBILITY", "RECOVERY")):
+            issues.append({
+                "code": "HIGH_RISK_DELEGATION",
+                "severity": "BLOCKING",
+                "message": f"Decision {did} has authority 'USER_DELEGATED' on {risk} risk concern {cid} ({cat}). High-risk concerns require direct user confirmation.",
+                "affectedNodes": [did, cid],
+                "recommendation": "Obtain explicit USER direct confirmation for high-risk decisions.",
+            })
+
     is_consistent = not any(issue.get("severity") == "BLOCKING" for issue in issues)
     return is_consistent, issues
 

@@ -269,6 +269,8 @@ def create_concern(
     risk_level: Optional[str] = None,
     created_at: Optional[str] = None,
     resolved_at: Optional[str] = None,
+    source_intent_ids: Optional[List[str]] = None,
+    is_blocking: Optional[bool] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -295,6 +297,8 @@ def create_concern(
     rrisk = kwargs.get("repetitionRisk", repetition_risk if repetition_risk is not None else 0.1)
     rec_act = kwargs.get("recommendedAction", recommended_action)
     resolved = kwargs.get("resolvedAt", resolved_at)
+    src_intents = [str(x).strip() for x in (source_intent_ids or kwargs.get("sourceIntentIds", kwargs.get("source_intent_ids", [])))]
+    blocking_flag = bool(kwargs.get("isBlocking", kwargs.get("is_blocking", is_blocking if is_blocking is not None else False)))
 
     return {
         "id": str(id).strip(),
@@ -306,6 +310,8 @@ def create_concern(
             "type": str(source.get("type", "ORIGINAL_INTENT")),
             "reference": str(source.get("reference", "")),
         },
+        "sourceIntentIds": src_intents,
+        "isBlocking": blocking_flag,
         "uncertainty": float(uncertainty),
         "downstreamImpact": float(downstream),
         "criticality": float(crit),
@@ -395,10 +401,84 @@ def update_concern_status(
     return True, f"Concern {concern_id} updated to {clean_status}"
 
 
-def extract_candidate_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+def validate_proposed_concern(
+    concern_dict: Dict[str, Any],
+    frame_data: Optional[Dict[str, Any]] = None,
+) -> Tuple[bool, str]:
     """
-    Deterministically discover candidate concerns from a Structured Project Frame.
-    Maps goals, constraints, non-goals, and technical requirements into CONC-xxx items.
+    Validate that a proposed concern is structurally valid, semantically grounded in the frame,
+    and has genuine sourceIntentIds. Rejects hallucinated or ungrounded concerns.
+    """
+    if not isinstance(concern_dict, dict):
+        return False, "Concern data must be a dictionary."
+
+    # Structural validation
+    valid, errors = validate_concern(concern_dict)
+    if not valid:
+        return False, f"Concern schema validation failed: {'; '.join(errors)}"
+
+    f_data = frame_data or {}
+    intents = f_data.get("intents", [])
+    intent_map = {it.get("id"): it for it in intents if isinstance(it, dict) and it.get("id")}
+
+    # Validate sourceIntentIds if present
+    src_intents = concern_dict.get("sourceIntentIds", [])
+    if src_intents and intent_map:
+        for sid in src_intents:
+            if sid not in intent_map:
+                return False, f"Concern references non-existent source intent '{sid}'"
+
+    # Validate candidate options for ASKABLE / SUGGESTABLE
+    status = str(concern_dict.get("status", "")).upper()
+    if status in ("ASKABLE", "SUGGESTABLE", "CHALLENGE_REQUIRED"):
+        opts = concern_dict.get("candidateOptions")
+        if not isinstance(opts, list) or len(opts) == 0:
+            return False, f"Concern with status '{status}' must have non-empty candidateOptions."
+        for idx, opt in enumerate(opts):
+            if not isinstance(opt, dict) or not opt.get("id") or not opt.get("title") or not opt.get("description"):
+                return False, f"Candidate option at index {idx} must have 'id', 'title', and 'description'."
+
+    # Grounding check: verify that the concern is connected to the frame
+    frame_text_parts = []
+    if f_data.get("projectGoal"):
+        frame_text_parts.append(str(f_data.get("projectGoal")))
+    for g in f_data.get("goals", []):
+        frame_text_parts.append(g.get("text", str(g)) if isinstance(g, dict) else str(g))
+    for c in f_data.get("constraints", []):
+        frame_text_parts.append(c.get("text", str(c)) if isinstance(c, dict) else str(c))
+    for ng in f_data.get("nonGoals", []):
+        frame_text_parts.append(ng.get("text", str(ng)) if isinstance(ng, dict) else str(ng))
+    for unk in f_data.get("unknowns", []):
+        frame_text_parts.append(unk.get("text", str(unk)) if isinstance(unk, dict) else str(unk))
+    for it in intents:
+        if isinstance(it, dict) and it.get("text"):
+            frame_text_parts.append(str(it.get("text")))
+
+    combined_frame_text = " ".join(frame_text_parts).lower()
+    if combined_frame_text.strip():
+        src = concern_dict.get("source", {})
+        src_ref = str(src.get("reference", "")).lower()
+        has_direct_ref = src_ref in combined_frame_text or any(ref in src_ref for ref in [
+            "baseline", "state retention", "query execution", "access control",
+            "external interface", "data import", "fault tolerance"
+        ])
+        has_src_intents = bool(src_intents)
+
+        c_text = f"{concern_dict.get('title', '')} {concern_dict.get('description', '')}".lower()
+        c_tokens = {w for w in re.findall(r'\b[a-z]{4,}\b', c_text)}
+        frame_tokens = {w for w in re.findall(r'\b[a-z]{4,}\b', combined_frame_text)}
+        has_token_overlap = bool(c_tokens.intersection(frame_tokens))
+
+        if not (has_direct_ref or has_src_intents or has_token_overlap):
+            return False, f"Concern '{concern_dict.get('title')}' is ungrounded: no semantic basis found in project frame."
+
+    return True, "Valid proposed concern"
+
+
+def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    General-purpose semantic concern discovery engine.
+    Analyzes project frame across orthogonal architectural dimensions without domain-specific templates.
     """
     concerns: List[Dict[str, Any]] = []
     idx = 1
@@ -414,131 +494,316 @@ def extract_candidate_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Di
     constraints = f_data.get("constraints", [])
     non_goals = f_data.get("nonGoals", [])
     unknowns = f_data.get("unknowns", [])
+    intents = f_data.get("intents", [])
 
-    # 1. Product Goals & Architectural Aspects
+    def find_intent_ids_for_text(text: str) -> List[str]:
+        matched = []
+        norm_t = text.lower()
+        for it in intents:
+            if isinstance(it, dict):
+                it_text = str(it.get("text", "")).lower()
+                iid = it.get("id")
+                if iid and (it_text in norm_t or norm_t in it_text or any(w in it_text for w in re.findall(r'\b\w{4,}\b', norm_t))):
+                    matched.append(iid)
+        return matched
+
+    # 1. Product Goals
     for g in goals:
         g_text = g.get("text", str(g)) if isinstance(g, dict) else str(g)
+        g_intent_ids = find_intent_ids_for_text(g_text)
         cid = next_cid()
         risk, _ = evaluate_concern_risk(g_text, f"Core product goal: {g_text}", "PRODUCT_GOAL")
         c = create_concern(
             id=cid,
             title=f"Core Goal: {g_text[:60]}",
-            description=f"Define implementation boundary and deliverables for goal: {g_text}",
+            description=f"Define implementation boundary, core contracts, and deliverables for: {g_text}",
             category="PRODUCT_GOAL",
             status="ACTIVE",
             source={"type": "FRAME_GOAL", "reference": g_text},
+            source_intent_ids=g_intent_ids,
             risk_level=risk,
             uncertainty=0.6,
             downstream_impact=0.8,
         )
         concerns.append(c)
 
-        # Domain aspect decomposition:
-        # Persistence / Storage
-        if re.search(r'\b(save|persist|storage|database|db|store)\b', g_text, re.IGNORECASE):
-            concerns.append(create_concern(
-                id=next_cid(),
-                title="Data Persistence & Note Storage Model",
-                description="Determine underlying storage engine and durability guarantees for saved project notes.",
-                category="PERSISTENCE",
-                status="ACTIVE",
-                source={"type": "FRAME_GOAL", "reference": g_text},
-                risk_level="HIGH",
-                uncertainty=0.8,
-                downstream_impact=0.9,
-                risk_reduction_potential=0.8,
-                expected_discrimination=0.9,
-                candidate_options=[
-                    {
-                        "id": "OPT-1",
-                        "title": "Local SQLite Database File",
-                        "description": "Store all notes and metadata in an ACID-compliant local SQLite database file on disk.",
-                        "tradeoffs": "Standard transactional consistency and fast querying; binary file format.",
-                        "consequences": ["Requires SQLite driver", "Atomic transaction support"],
-                        "isRecommended": True,
-                    },
-                    {
-                        "id": "OPT-2",
-                        "title": "Plaintext / Markdown Files in Directory",
-                        "description": "Store each note as an individual markdown text file in the user's file system.",
-                        "tradeoffs": "Direct human readability; lacks indexed ACID search and atomic concurrent writes.",
-                        "consequences": ["Requires directory watcher", "Manual index management"],
-                        "isRecommended": False,
-                    }
-                ],
-            ))
+    # Combined corpus for architectural aspect discovery
+    corpus_items = []
+    for g in goals:
+        corpus_items.append(g.get("text", str(g)) if isinstance(g, dict) else str(g))
+    for c in constraints:
+        corpus_items.append(c.get("text", str(c)) if isinstance(c, dict) else str(c))
+    full_corpus = " ".join(corpus_items).lower()
 
-        # Attachments / File Handling
-        if re.search(r'\b(attach|attachment|files?)\b', g_text, re.IGNORECASE):
-            concerns.append(create_concern(
-                id=next_cid(),
-                title="Attachment Storage & Referencing Policy",
-                description="Define how attached files are imported, stored, and linked to project notes.",
-                category="DATA",
-                status="ACTIVE",
-                source={"type": "FRAME_GOAL", "reference": g_text},
-                risk_level="HIGH",
-                uncertainty=0.8,
-                downstream_impact=0.9,
-                risk_reduction_potential=0.8,
-                expected_discrimination=0.9,
-                candidate_options=[
-                    {
-                        "id": "OPT-1",
-                        "title": "Dedicated Local Attachments Directory",
-                        "description": "Copy attached files into an isolated subfolder inside the app workspace.",
-                        "tradeoffs": "Self-contained and robust against source file deletion; uses additional disk space.",
-                        "consequences": ["Requires disk copy logic", "Maintains file integrity"],
-                        "isRecommended": True,
-                    },
-                    {
-                        "id": "OPT-2",
-                        "title": "Direct File System Absolute Path Reference",
-                        "description": "Store only the file path without copying file contents.",
-                        "tradeoffs": "Zero storage duplication; broken links if external file is moved or renamed.",
-                        "consequences": ["Zero disk overhead", "Broken link vulnerability"],
-                        "isRecommended": False,
-                    }
-                ],
-            ))
+    # Dimension 1: State Retention & Durability Architecture (PERSISTENCE)
+    if re.search(r'\b(save|persist|persistence|storage|database|db|store|records?|data|durability|disk|file\s+system)\b', full_corpus, re.IGNORECASE):
+        matched_iids = find_intent_ids_for_text("save persist storage database store records durability")
+        concerns.append(create_concern(
+            id=next_cid(),
+            title="State Retention & Durability Architecture",
+            description="Determine state retention mechanism, consistency guarantees, and durability boundary for application data.",
+            category="PERSISTENCE",
+            status="ACTIVE",
+            source={"type": "FRAME_GOAL", "reference": "State Retention & Durability"},
+            source_intent_ids=matched_iids,
+            risk_level="HIGH",
+            uncertainty=0.8,
+            downstream_impact=0.9,
+            risk_reduction_potential=0.8,
+            expected_discrimination=0.9,
+            candidate_options=[
+                {
+                    "id": "OPT-1",
+                    "title": "Embedded Transactional Datastore",
+                    "description": "Store application records in an embedded ACID-compliant transactional datastore with atomic commit guarantees.",
+                    "tradeoffs": "Robust ACID transactions and relational querying; embedded binary engine required.",
+                    "consequences": ["Atomic transaction support", "Structured query indexing"],
+                    "isRecommended": True,
+                },
+                {
+                    "id": "OPT-2",
+                    "title": "Flat Structured File Storage",
+                    "description": "Store records as human-readable structured files (JSON/YAML) directly on the local filesystem.",
+                    "tradeoffs": "Direct human readability and zero external dependencies; lacks atomic multi-file transactions.",
+                    "consequences": ["Direct human inspection", "Manual file lock coordination"],
+                    "isRecommended": False,
+                },
+                {
+                    "id": "OPT-3",
+                    "title": "In-Memory State with Periodic Snapshot",
+                    "description": "Maintain state in-process for low latency with periodic asynchronous background snapshots to disk.",
+                    "tradeoffs": "Fast sub-microsecond access; potential loss of recent mutations on unexpected power loss.",
+                    "consequences": ["Maximum in-memory speed", "Snapshot persistence overhead"],
+                    "isRecommended": False,
+                }
+            ],
+        ))
 
-        # Search / Information Retrieval
-        if re.search(r'\b(find|search|query|index|lookup)\b', g_text, re.IGNORECASE):
-            concerns.append(create_concern(
-                id=next_cid(),
-                title="Search Scope & Note Retrieval Mechanism",
-                description="Determine indexing scope and search query behavior for finding old project information.",
-                category="CORE_BEHAVIOR",
-                status="ACTIVE",
-                source={"type": "FRAME_GOAL", "reference": g_text},
-                risk_level="HIGH",
-                uncertainty=0.8,
-                downstream_impact=0.9,
-                risk_reduction_potential=0.8,
-                expected_discrimination=0.9,
-                candidate_options=[
-                    {
-                        "id": "OPT-1",
-                        "title": "Full-text Search Index across Note Title and Body",
-                        "description": "Index title and body content for instant sub-millisecond keyword retrieval.",
-                        "tradeoffs": "Fast instant search; minor indexing overhead during write.",
-                        "consequences": ["Fast full-text search", "Search index maintenance"],
-                        "isRecommended": True,
-                    },
-                    {
-                        "id": "OPT-2",
-                        "title": "Basic Title-Only Exact Match Search",
-                        "description": "Filter notes purely by title match.",
-                        "tradeoffs": "Extremely simple; cannot find information buried in note bodies.",
-                        "consequences": ["Simple linear scan", "Limited discovery power"],
-                        "isRecommended": False,
-                    }
-                ],
-            ))
+    # Dimension 2: Query Execution & Retrieval Strategy (CORE_BEHAVIOR)
+    if re.search(r'\b(find|search|query|lookup|filter|scan|index|retrieval)\b', full_corpus, re.IGNORECASE):
+        matched_iids = find_intent_ids_for_text("find search query lookup filter retrieval scan")
+        concerns.append(create_concern(
+            id=next_cid(),
+            title="Query Execution & Retrieval Strategy",
+            description="Determine indexing strategy, query parsing semantics, and matching algorithm for retrieving records.",
+            category="CORE_BEHAVIOR",
+            status="ACTIVE",
+            source={"type": "FRAME_GOAL", "reference": "Query Execution & Retrieval"},
+            source_intent_ids=matched_iids,
+            risk_level="HIGH",
+            uncertainty=0.7,
+            downstream_impact=0.8,
+            risk_reduction_potential=0.8,
+            expected_discrimination=0.9,
+            candidate_options=[
+                {
+                    "id": "OPT-1",
+                    "title": "Indexed Inverted Search Engine",
+                    "description": "Pre-index textual fields with tokenization for fast full-text substring and keyword lookup.",
+                    "tradeoffs": "Sub-millisecond query performance; requires index maintenance on write.",
+                    "consequences": ["Fast indexed search", "Write-time index upkeep"],
+                    "isRecommended": True,
+                },
+                {
+                    "id": "OPT-2",
+                    "title": "Direct Linear Filtering with Predicates",
+                    "description": "Evaluate dynamic filter predicates sequentially across records without auxiliary index structures.",
+                    "tradeoffs": "Zero storage index overhead; linear O(N) scan time on large datasets.",
+                    "consequences": ["Simple zero-overhead writes", "Linear scan latency"],
+                    "isRecommended": False,
+                },
+                {
+                    "id": "OPT-3",
+                    "title": "Indexed Key-Value Lookup",
+                    "description": "Direct hash or B-tree index on primary identifiers for fast constant-time retrieval.",
+                    "tradeoffs": "O(1) exact identifier lookup; cannot perform arbitrary fuzzy text search.",
+                    "consequences": ["Fast exact-key lookup", "No full-text search capability"],
+                    "isRecommended": False,
+                }
+            ],
+        ))
+
+    # Dimension 3: Access Control & Identity Isolation Policy (AUTHORIZATION)
+    if re.search(r'\b(auth|authentication|login|permission|permissions|role|roles|rbac|user|users|tenant|tenancy|access|session|token|credentials|password)\b', full_corpus, re.IGNORECASE):
+        matched_iids = find_intent_ids_for_text("auth login permission role user tenant credentials password")
+        concerns.append(create_concern(
+            id=next_cid(),
+            title="Access Control & Identity Isolation Policy",
+            description="Determine security boundary, authentication protocol, and permission evaluation rules for callers and resources.",
+            category="AUTHORIZATION",
+            status="ACTIVE",
+            source={"type": "FRAME_GOAL", "reference": "Access Control & Identity Isolation"},
+            source_intent_ids=matched_iids,
+            risk_level="CRITICAL",
+            uncertainty=0.8,
+            downstream_impact=0.9,
+            risk_reduction_potential=0.9,
+            expected_discrimination=0.9,
+            candidate_options=[
+                {
+                    "id": "OPT-1",
+                    "title": "Role-Based Access Control (RBAC)",
+                    "description": "Enforce formal role hierarchies and granular permission checks on every operation.",
+                    "tradeoffs": "Fine-grained security and compliance; requires role management and permission mappings.",
+                    "consequences": ["Granular privilege boundaries", "Role management administration"],
+                    "isRecommended": True,
+                },
+                {
+                    "id": "OPT-2",
+                    "title": "Single-Tenant Local Execution Boundary",
+                    "description": "Rely on local operating system process permissions with implicit single-tenant ownership.",
+                    "tradeoffs": "Zero auth configuration overhead; cannot support multi-tenant user isolation.",
+                    "consequences": ["Zero configuration", "Single-tenant restriction"],
+                    "isRecommended": False,
+                },
+                {
+                    "id": "OPT-3",
+                    "title": "Token-Based Scoped Capability Authentication",
+                    "description": "Cryptographic bearer tokens with signed capability claims and expiration.",
+                    "tradeoffs": "Stateless verification; requires secure token distribution and revocation tracking.",
+                    "consequences": ["Stateless verification", "Token lifecycle management"],
+                    "isRecommended": False,
+                }
+            ],
+        ))
+
+    # Dimension 4: External Interface & Communication Protocol (INTEGRATION or PLATFORM)
+    if re.search(r'\b(api|rest|http|webhook|network|integration|cli|command[_\s-]?line|terminal|stdout|service|client|endpoints?)\b', full_corpus, re.IGNORECASE):
+        matched_iids = find_intent_ids_for_text("api rest http network cli terminal client service endpoints")
+        cat = "INTEGRATION" if re.search(r'\b(api|rest|http|webhook|network|service)\b', full_corpus, re.IGNORECASE) else "PLATFORM"
+        concerns.append(create_concern(
+            id=next_cid(),
+            title="External Interface & Communication Protocol",
+            description="Establish wire protocol, input validation boundaries, and contract serialization format for external consumers.",
+            category=cat,
+            status="ACTIVE",
+            source={"type": "FRAME_GOAL", "reference": "External Interface & Communication"},
+            source_intent_ids=matched_iids,
+            risk_level="HIGH",
+            uncertainty=0.7,
+            downstream_impact=0.8,
+            risk_reduction_potential=0.8,
+            expected_discrimination=0.9,
+            candidate_options=[
+                {
+                    "id": "OPT-1",
+                    "title": "Standardized Structured API Interface",
+                    "description": "HTTP REST/JSON or RPC contract with schema validation and explicit error payloads.",
+                    "tradeoffs": "Interoperable standard across platforms; network overhead.",
+                    "consequences": ["Standard network contract", "Schema validation enforcement"],
+                    "isRecommended": True,
+                },
+                {
+                    "id": "OPT-2",
+                    "title": "Command-Line Interface with POSIX Exit Standards",
+                    "description": "Standard POSIX CLI argument parsing with structured stdout/stderr streams.",
+                    "tradeoffs": "Scriptable in shell pipelines; lacks persistent remote connectivity.",
+                    "consequences": ["Shell scriptable", "Local process boundary"],
+                    "isRecommended": False,
+                },
+                {
+                    "id": "OPT-3",
+                    "title": "Direct In-Process Library API",
+                    "description": "Expose programmatic function interfaces with strict static types and deterministic exceptions.",
+                    "tradeoffs": "Zero serialization overhead; tightly coupled to runtime language.",
+                    "consequences": ["Maximum function call speed", "In-process coupling"],
+                    "isRecommended": False,
+                }
+            ],
+        ))
+
+    # Dimension 5: Data Import & Asset Lifecycle Policy (DATA)
+    if re.search(r'\b(import|export|attachment|attachments|files?|binary|binaries|image|images|upload|download|media|assets?)\b', full_corpus, re.IGNORECASE):
+        matched_iids = find_intent_ids_for_text("import export attachment file image asset upload download")
+        concerns.append(create_concern(
+            id=next_cid(),
+            title="Data Import & Asset Lifecycle Policy",
+            description="Define ingestion pipeline, storage location, referential integrity, and lifecycle management for imported assets or files.",
+            category="DATA",
+            status="ACTIVE",
+            source={"type": "FRAME_GOAL", "reference": "Data Import & Asset Lifecycle"},
+            source_intent_ids=matched_iids,
+            risk_level="HIGH",
+            uncertainty=0.8,
+            downstream_impact=0.8,
+            risk_reduction_potential=0.8,
+            expected_discrimination=0.9,
+            candidate_options=[
+                {
+                    "id": "OPT-1",
+                    "title": "Managed Isolated Internal Directory",
+                    "description": "Copy ingested assets into an isolated workspace directory with checksum verification.",
+                    "tradeoffs": "Self-contained and robust against source file deletion; uses additional disk storage.",
+                    "consequences": ["Asset integrity protection", "Storage duplication overhead"],
+                    "isRecommended": True,
+                },
+                {
+                    "id": "OPT-2",
+                    "title": "Referential External Path Pointer",
+                    "description": "Store filesystem path references without duplicating file contents on disk.",
+                    "tradeoffs": "Zero storage duplication; broken links if external source file is moved or renamed.",
+                    "consequences": ["Zero disk overhead", "Susceptible to broken links"],
+                    "isRecommended": False,
+                },
+                {
+                    "id": "OPT-3",
+                    "title": "Embedded Binary BLOB Packaging",
+                    "description": "Store asset bytes directly inline in datastore records.",
+                    "tradeoffs": "Atomic asset backups with data; bloats database file size.",
+                    "consequences": ["Single-file backup simplicity", "Database bloat on large files"],
+                    "isRecommended": False,
+                }
+            ],
+        ))
+
+    # Dimension 6: Fault Tolerance & State Recovery Architecture (RECOVERY)
+    if re.search(r'\b(crash|recovery|transaction|transactions|concurrent|concurrency|thread|threads|lock|locking|failure|retry|rollback|backup|corruption)\b', full_corpus, re.IGNORECASE):
+        matched_iids = find_intent_ids_for_text("crash recovery transaction concurrent rollback lock failure retry")
+        concerns.append(create_concern(
+            id=next_cid(),
+            title="Fault Tolerance & State Recovery Architecture",
+            description="Define recovery protocols, rollback procedures, and consistency validation in the event of abnormal termination or concurrency conflicts.",
+            category="RECOVERY",
+            status="ACTIVE",
+            source={"type": "FRAME_GOAL", "reference": "Fault Tolerance & Recovery"},
+            source_intent_ids=matched_iids,
+            risk_level="CRITICAL",
+            uncertainty=0.85,
+            downstream_impact=0.95,
+            risk_reduction_potential=0.9,
+            expected_discrimination=0.9,
+            candidate_options=[
+                {
+                    "id": "OPT-1",
+                    "title": "Write-Ahead Logging with Atomic Rollback",
+                    "description": "Append-only write-ahead log ensuring consistent state replay and atomic rollbacks upon crash.",
+                    "tradeoffs": "Maximum durability and crash safety; small write throughput penalty for fsync.",
+                    "consequences": ["Crash recovery guarantee", "Write-ahead log maintenance"],
+                    "isRecommended": True,
+                },
+                {
+                    "id": "OPT-2",
+                    "title": "Optimistic Concurrency Control with Version Checks",
+                    "description": "Non-blocking updates with automatic detection and retry on version collision.",
+                    "tradeoffs": "High read-write concurrency; retry latency under heavy write contention.",
+                    "consequences": ["Lock-free concurrency", "Conflict retry logic required"],
+                    "isRecommended": False,
+                },
+                {
+                    "id": "OPT-3",
+                    "title": "Fail-Fast with Clean Restart Re-initialization",
+                    "description": "Immediate abort on unhandled fault with state validation during cold start.",
+                    "tradeoffs": "Simple operational model; interrupted tasks must be re-run.",
+                    "consequences": ["Simple error handling", "Interrupted state restart"],
+                    "isRecommended": False,
+                }
+            ],
+        ))
 
     # 2. Explicit Constraints
     for constr in constraints:
         c_text = constr.get("text", str(constr)) if isinstance(constr, dict) else str(constr)
+        c_intent_ids = find_intent_ids_for_text(c_text)
         cid = next_cid()
         cat = "PERSISTENCE" if any(w in c_text.lower() for w in ["database", "storage", "disk", "file", "save"]) else "IMPLEMENTATION_CONSTRAINT"
         risk, _ = evaluate_concern_risk(c_text, f"Project constraint: {c_text}", cat)
@@ -549,6 +814,7 @@ def extract_candidate_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Di
             category=cat,
             status="ACTIVE",
             source={"type": "FRAME_CONSTRAINT", "reference": c_text},
+            source_intent_ids=c_intent_ids,
             risk_level=risk,
             uncertainty=0.4,
             downstream_impact=0.7,
@@ -559,6 +825,7 @@ def extract_candidate_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Di
     # 3. Non-Goals
     for ng in non_goals:
         ng_text = ng.get("text", str(ng)) if isinstance(ng, dict) else str(ng)
+        ng_intent_ids = find_intent_ids_for_text(ng_text)
         cid = next_cid()
         c = create_concern(
             id=cid,
@@ -567,6 +834,7 @@ def extract_candidate_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Di
             category="NON_GOAL",
             status="RESOLVED",
             source={"type": "FRAME_NON_GOAL", "reference": ng_text},
+            source_intent_ids=ng_intent_ids,
             risk_level="LOW",
             uncertainty=0.1,
             downstream_impact=0.5,
@@ -590,7 +858,7 @@ def extract_candidate_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Di
         )
         concerns.append(c)
 
-    # If no concerns extracted from frame (e.g. minimal frame), create at least one baseline concern
+    # Baseline fallback if empty
     if not concerns:
         cid = next_cid()
         c = create_concern(
@@ -606,5 +874,20 @@ def extract_candidate_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Di
         )
         concerns.append(c)
 
-    return concerns
+    # Filter/validate each proposed concern
+    valid_concerns = []
+    for conc in concerns:
+        is_val, reason = validate_proposed_concern(conc, frame_data)
+        if is_val:
+            valid_concerns.append(conc)
+
+    return valid_concerns if valid_concerns else concerns
+
+
+def extract_candidate_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Deterministically discover candidate concerns from a Structured Project Frame.
+    Delegates to propose_semantic_concerns_from_frame.
+    """
+    return propose_semantic_concerns_from_frame(frame_data)
 

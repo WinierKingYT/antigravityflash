@@ -158,8 +158,8 @@ def evaluate_stopping_conditions(
             resolved.append(c)
         else:
             unresolved.append(c)
-            # CRITICAL risk or explicit isBlocking flags make this a blocking concern
-            if risk == "CRITICAL" or is_blocking or (risk == "HIGH" and is_blocking):
+            # CRITICAL and HIGH risk concerns or explicit isBlocking flags make this a blocking concern
+            if risk in ("CRITICAL", "HIGH") or is_blocking:
                 blocking_concern_ids.append(cid)
 
     # Validate decision graph if provided
@@ -204,11 +204,16 @@ def evaluate_stopping_conditions(
         can_proceed = True
         reason = "All discovered concerns have been resolved"
     elif fatigue_reached:
-        can_proceed = True
-        reason = (
-            f"Session fatigue limit reached ({asked_count}/{max_questions} questions asked); "
-            "no blocking critical concerns remain"
-        )
+        has_high_utility = any(u >= threshold for u in utilities) or len(blocking_concern_ids) > 0
+        if has_high_utility:
+            can_proceed = False
+            reason = "SESSION_QUESTION_BUDGET_REACHED"
+        else:
+            can_proceed = True
+            reason = (
+                f"Session fatigue limit reached ({asked_count}/{max_questions} questions asked); "
+                "no blocking or high-utility concerns remain"
+            )
     elif all_below_threshold:
         can_proceed = True
         reason = (

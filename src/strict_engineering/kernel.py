@@ -763,6 +763,44 @@ def check_and_invalidate_stale(workspace_dir: Path) -> List[str]:
     return invalidated
 
 
+def propagate_decision_change(
+    workspace_dir: Path,
+    superseded_decision_id: str,
+    new_decision_id: Optional[str] = None,
+) -> List[str]:
+    """
+    Find requirements deriving from superseded decision and invalidate them to STALE.
+    Records change in changes.jsonl and invalidates downstream requirement states.
+    """
+    workspace_path = Path(workspace_dir).resolve()
+    reqs = load_requirements(workspace_path)
+    if not reqs:
+        return []
+
+    invalidated: List[str] = []
+    for r in reqs:
+        d_ref = r.get("decisionId") or r.get("sourceDecision")
+        sources = r.get("sources", [])
+        if d_ref == superseded_decision_id or superseded_decision_id in sources:
+            r["status"] = "STALE"
+            r["stalenessReason"] = f"Derives from superseded decision {superseded_decision_id}"
+            r["updatedAt"] = utc_now_iso()
+            if new_decision_id and new_decision_id not in sources:
+                sources.append(new_decision_id)
+            invalidated.append(r.get("id"))
+
+    if invalidated:
+        save_requirements(workspace_path, reqs)
+        record_change(
+            workspace_path,
+            change_description=f"Decision supersession ({superseded_decision_id} -> {new_decision_id or 'REVOKED'}): invalidated requirements {invalidated} to STALE",
+            rationale="Automatic decision supersession requirement invalidation",
+            affected_requirements=invalidated,
+        )
+
+    return invalidated
+
+
 def record_change(
     workspace_dir: Path,
     *args,

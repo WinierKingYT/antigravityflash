@@ -10,7 +10,7 @@ import re
 import sys
 import json
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple, Set
+from typing import Dict, Any, List, Optional, Tuple, Set, Union
 
 try:
     from . import kernel
@@ -27,6 +27,9 @@ try:
     from . import hidden_verification
     from . import evidence_resolution
     from . import context_registry
+    from . import decision_events
+    from . import decision_coverage
+    from . import consistency_reviewer
 except (ImportError, ValueError):
     import kernel
     import fingerprint
@@ -42,6 +45,14 @@ except (ImportError, ValueError):
     import hidden_verification
     import evidence_resolution
     import context_registry
+    try:
+        import decision_events
+        import decision_coverage
+        import consistency_reviewer
+    except ImportError:
+        decision_events = None
+        decision_coverage = None
+        consistency_reviewer = None
 
 PROTECTED_ARTIFACTS = {
     ".agent-harness/original-request.md",
@@ -59,6 +70,15 @@ PROTECTED_ARTIFACTS = {
     ".agent-harness/counterexample-audit.json",
     ".agent-harness/hidden-checks.json",
     ".agent-harness/evidence-resolutions.json",
+    ".agent-harness/frame.json",
+    ".agent-harness/concerns.json",
+    ".agent-harness/decisions.json",
+    ".agent-harness/decision-graph.json",
+    ".agent-harness/decision-coverage.json",
+    ".agent-harness/decision-events.jsonl",
+    ".agent-harness/decision-status.json",
+    ".agent-harness/asked-questions.json",
+    ".agent-harness/suggestions.json",
 }
 
 # Shell write commands matching PowerShell, cmd, Python inline, and file manipulation tools
@@ -86,8 +106,12 @@ def normalize_rel_path(path_str: str, workspace_root: Path) -> str:
         return str(path_str).replace("\\", "/")
 
 
-def resolve_workspace(payload: Dict[str, Any]) -> Optional[Path]:
-    """Resolve active workspace directory from hook payload."""
+def resolve_workspace(payload: Any) -> Optional[Path]:
+    """Resolve active workspace directory from hook payload or path."""
+    if isinstance(payload, (str, Path)):
+        return Path(payload).resolve()
+    if not isinstance(payload, dict):
+        return None
     ws_paths = payload.get("workspacePaths", [])
     if ws_paths:
         return Path(ws_paths[0]).resolve()
@@ -95,6 +119,26 @@ def resolve_workspace(payload: Dict[str, Any]) -> Optional[Path]:
     if cwd:
         return Path(cwd).resolve()
     return None
+
+
+def is_write_safe(
+    target_path: Union[str, Path],
+    calling_role: str = "builder",
+    workspace_root: Optional[Union[str, Path]] = None,
+) -> Tuple[bool, str]:
+    """
+    Check if a file write is safe and allowed by the kernel gate.
+    """
+    if workspace_root:
+        ws = Path(workspace_root).resolve()
+        rel_path = normalize_rel_path(str(target_path), ws)
+    else:
+        rel_path = str(target_path).replace("\\", "/")
+
+    if rel_path in PROTECTED_ARTIFACTS:
+        return False, f"Direct write denied: '{rel_path}' is a protected harness artifact."
+    return True, "Allowed"
+
 
 
 def evaluate_pre_tool_use(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -190,12 +234,17 @@ def evaluate_pre_tool_use(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"decision": "allow"}
 
 
-def evaluate_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
+def evaluate_stop(payload: Any) -> Dict[str, Any]:
     """
     Evaluates Stop completion gate.
     Verifies 100% pass rate, fresh fingerprints, evidence chain validity,
     execution-backed passes, fake PASS rejection, zero regressions, and full policy satisfaction.
     """
+    if isinstance(payload, (str, Path)):
+        payload = {"workspacePaths": [str(payload)]}
+    elif not isinstance(payload, dict):
+        payload = {}
+
     # Check for unrecoverable termination reasons (fatal errors, max steps, abort)
     term_reason = payload.get("terminationReason", "")
     if term_reason in {"error", "fatal_error", "max_steps", "user_abort", "abort", "cancelled", "user_cancelled", "aborted"}:
@@ -527,6 +576,35 @@ def evaluate_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
     # 10. Final Audit Status
     if not state.get("finalAuditPassed", False):
         unresolved_gates.append("Final clean-room verifier audit has not passed (finalAuditPassed=false)")
+
+    # 11. STEP 7: Decision Engine Integrity, Consistency, and Coverage Audit
+    frame_file = kernel.get_harness_dir(workspace) / "frame.json"
+    dec_file = kernel.get_harness_dir(workspace) / "decisions.json"
+    dec_events_file = kernel.get_harness_dir(workspace) / "decision-events.jsonl"
+
+    if frame_file.exists() or dec_file.exists() or dec_events_file.exists():
+        # Check Decision Event Ledger Cryptographic Integrity
+        if dec_events_file.exists() and decision_events is not None:
+            ledger_ok, ledger_errors = decision_events.verify_decision_events_integrity(workspace)
+            if not ledger_ok:
+                unresolved_gates.append(f"Decision event ledger integrity violated: {'; '.join(ledger_errors)}")
+
+        # Check Decision Consistency
+        if consistency_reviewer is not None and frame_file.exists():
+            consist_ok, consist_issues = consistency_reviewer.audit_workspace_consistency(workspace)
+            if not consist_ok:
+                blocking_consist = [i["message"] for i in consist_issues if i.get("severity") == "BLOCKING"]
+                unresolved_gates.append(f"Decision consistency audit blocked: {'; '.join(blocking_consist)}")
+
+        # Check Decision Coverage and detect Orphaned Requirements
+        if decision_coverage is not None:
+            try:
+                dec_cov = decision_coverage.sync_decision_coverage(workspace)
+                orphans = dec_cov.get("orphanedRequirements", [])
+                if orphans:
+                    unresolved_gates.append(f"Orphaned requirements detected without decision trace: {', '.join(orphans)}")
+            except Exception:
+                pass
 
     if unresolved_gates:
         issues_summary = "\n- " + "\n- ".join(unresolved_gates)

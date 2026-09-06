@@ -65,6 +65,18 @@ def sanitize_text(text: str) -> str:
     return sanitized
 
 
+def prepare_blind_verification_context_expectation(
+    workspace_dir: Path,
+    task_id: str = "task-default",
+) -> Dict[str, Any]:
+    """Prepares and locks a single-use context expectation for Blind Final Verifier."""
+    return context_registry.create_context_expectation(
+        workspace_dir=workspace_dir,
+        expected_purpose="BLIND_FINAL_VERIFIER",
+        task_id=task_id,
+    )
+
+
 def compile_blind_verification_packet(
     workspace_dir: Path,
     requirement_ids: Optional[List[str]] = None,

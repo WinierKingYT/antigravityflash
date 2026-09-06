@@ -40,31 +40,23 @@ def main():
     try:
         workspace = gate.resolve_workspace(payload)
 
-        # Ingest authoritative runtime context metadata if present
+        # Ingest authoritative runtime context metadata strictly through protected internal hook boundary
         conv_id = (
             payload.get("conversationId")
             or payload.get("conversation_id")
             or payload.get("conversationID")
         )
         if workspace and conv_id and kernel.is_harness_active(workspace):
-            purpose = (
-                payload.get("contextPurpose")
-                or payload.get("role")
-                or os.environ.get("STRICT_ENGINEERING_ROLE")
-                or "BUILDER"
-            )
-            origin = payload.get("origin") or "ANTIGRAVITY_RUNTIME_HOOK"
             task_id = payload.get("taskId") or "TASK-STEP6S1"
             try:
-                context_registry.register_runtime_context(
+                context_registry._ingest_antigravity_hook_context(
                     workspace_dir=workspace,
                     hook_payload=payload,
-                    context_purpose=purpose,
-                    origin=origin,
+                    event_type=action,
                     task_id=task_id,
                 )
             except Exception as reg_err:
-                sys.stderr.write(f"[Strict-Engineering-Hook] Context registration notice: {reg_err}\n")
+                sys.stderr.write(f"[Strict-Engineering-Hook] Context ingestion notice: {reg_err}\n")
 
         if action in {"pre-tool", "pretooluse", "pre_tool", "pre_tool_use"}:
             result = gate.evaluate_pre_tool_use(payload)

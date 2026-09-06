@@ -26,6 +26,10 @@ except (ImportError, ValueError):
 
 compute_context_event_hash = context_registry.compute_context_event_hash
 register_runtime_context = context_registry.register_runtime_context
+register_simulated_context = context_registry.register_simulated_context
+create_context_expectation = context_registry.create_context_expectation
+load_context_expectation = context_registry.load_context_expectation
+_ingest_antigravity_hook_context = context_registry._ingest_antigravity_hook_context
 verify_context_registry = context_registry.verify_context_registry
 load_context_registry = context_registry.load_context_registry
 get_registered_context_by_purpose = context_registry.get_registered_context_by_purpose

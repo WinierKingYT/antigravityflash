@@ -38,7 +38,7 @@ class TestStep6S1RuntimeContextProof(unittest.TestCase):
         self.harness_dir = self.workspace / ".agent-harness"
         self.harness_dir.mkdir(parents=True, exist_ok=True)
         # Initialize basic harness state
-        (self.harness_dir / "state.json").write_text(json.dumps({"phase": "ACTIVE", "verificationMode": "SINGLE_MODEL_BLIND"}), encoding="utf-8")
+        (self.harness_dir / "state.json").write_text(json.dumps({"phase": "ACTIVE", "verificationMode": "SINGLE_MODEL_BLIND", "allowSimulatedContext": True}), encoding="utf-8")
         (self.harness_dir / "requirements.json").write_text(json.dumps([
             {"id": "REQ-001", "description": "Core invariant", "riskLevel": "HIGH", "acceptanceCriteria": ["AC-1"]}
         ]), encoding="utf-8")
@@ -60,7 +60,7 @@ class TestStep6S1RuntimeContextProof(unittest.TestCase):
         self.assertIn("[UNPROVEN]", packet["verificationPrompt"])
 
     def test_c02_runtime_hook_context_registration(self):
-        """S6S1-C02: Antigravity hook payload registers verified context entry."""
+        """S6S1-C02: Antigravity hook payload registers verified context entry via expectation."""
         conv_id = "test-conv-verifier-12345"
         hook_payload = {
             "conversationId": conv_id,
@@ -70,15 +70,21 @@ class TestStep6S1RuntimeContextProof(unittest.TestCase):
             "modelName": "gemini-2.5-pro",
             "invocationNum": 0,
         }
-        reg = context_registry.register_runtime_context(
+        # Create active expectation for verifier
+        context_registry.create_context_expectation(
+            self.workspace,
+            expected_purpose="BLIND_FINAL_VERIFIER",
+        )
+        reg = context_registry._ingest_antigravity_hook_context(
             self.workspace,
             hook_payload,
-            context_purpose="BLIND_FINAL_VERIFIER",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            event_type="PreInvocation",
         )
         self.assertTrue(reg["eventHash"])
         self.assertEqual(reg["conversationId"], conv_id)
         self.assertEqual(reg["contextPurpose"], "BLIND_FINAL_VERIFIER")
+        self.assertEqual(reg["bindingStatus"], "EXPECTATION_CONSUMED")
+        self.assertEqual(reg["runtimeOriginStatus"], "TRUSTED_HOOK_PATH")
 
         # Verify registry integrity
         is_valid, errors = context_registry.verify_context_registry(self.workspace)
@@ -110,23 +116,24 @@ class TestStep6S1RuntimeContextProof(unittest.TestCase):
         """S6S1-C05: Verifier reusing Builder conversationId yields CONTEXT_REUSED."""
         shared_cid = "conv-builder-reused-001"
         # Register Builder
-        context_registry.register_runtime_context(
+        context_registry.register_simulated_context(
             self.workspace,
             {"conversationId": shared_cid, "transcriptPath": f"/brain/{shared_cid}/transcript.jsonl", "artifactDirectoryPath": f"/brain/{shared_cid}"},
             context_purpose="BUILDER",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            origin="SIMULATED_INTEGRATION",
         )
         # Register Verifier with same conversationId
-        context_registry.register_runtime_context(
+        context_registry.register_simulated_context(
             self.workspace,
             {"conversationId": shared_cid, "transcriptPath": f"/brain/{shared_cid}/transcript.jsonl", "artifactDirectoryPath": f"/brain/{shared_cid}"},
             context_purpose="BLIND_FINAL_VERIFIER",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            origin="SIMULATED_INTEGRATION",
         )
         status, details = context_registry.evaluate_context_isolation(
             self.workspace,
             verifier_purpose="BLIND_FINAL_VERIFIER",
             predecessor_purposes=["BUILDER"],
+            allow_simulated=True,
         )
         self.assertEqual(status, "CONTEXT_REUSED")
         self.assertEqual(details["reused_conversation_id"], shared_cid)
@@ -134,23 +141,24 @@ class TestStep6S1RuntimeContextProof(unittest.TestCase):
     def test_c06_pairwise_inequality_auditor_equals_builder_rejected(self):
         """S6S1-C06: Counterexample Auditor reusing Builder conversationId yields CONTEXT_REUSED."""
         b_cid = "conv-builder-002"
-        context_registry.register_runtime_context(
+        context_registry.register_simulated_context(
             self.workspace,
             {"conversationId": b_cid, "transcriptPath": f"/brain/{b_cid}/transcript.jsonl", "artifactDirectoryPath": f"/brain/{b_cid}"},
             context_purpose="BUILDER",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            origin="SIMULATED_INTEGRATION",
         )
         # Auditor reuses builder conversation
-        context_registry.register_runtime_context(
+        context_registry.register_simulated_context(
             self.workspace,
             {"conversationId": b_cid, "transcriptPath": f"/brain/{b_cid}/transcript.jsonl", "artifactDirectoryPath": f"/brain/{b_cid}"},
             context_purpose="COUNTEREXAMPLE_AUDITOR",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            origin="SIMULATED_INTEGRATION",
         )
         status, details = context_registry.evaluate_context_isolation(
             self.workspace,
             verifier_purpose="COUNTEREXAMPLE_AUDITOR",
             predecessor_purposes=["BUILDER", "BLIND_FINAL_VERIFIER"],
+            allow_simulated=True,
         )
         self.assertEqual(status, "CONTEXT_REUSED")
 
@@ -158,45 +166,46 @@ class TestStep6S1RuntimeContextProof(unittest.TestCase):
         """S6S1-C07: Counterexample Auditor reusing Blind Verifier conversationId yields CONTEXT_REUSED."""
         b_cid = "conv-builder-003"
         v_cid = "conv-verifier-003"
-        context_registry.register_runtime_context(
+        context_registry.register_simulated_context(
             self.workspace,
             {"conversationId": b_cid, "transcriptPath": f"/brain/{b_cid}/transcript.jsonl", "artifactDirectoryPath": f"/brain/{b_cid}"},
             context_purpose="BUILDER",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            origin="SIMULATED_INTEGRATION",
         )
-        context_registry.register_runtime_context(
+        context_registry.register_simulated_context(
             self.workspace,
             {"conversationId": v_cid, "transcriptPath": f"/brain/{v_cid}/transcript.jsonl", "artifactDirectoryPath": f"/brain/{v_cid}"},
             context_purpose="BLIND_FINAL_VERIFIER",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            origin="SIMULATED_INTEGRATION",
         )
         # Auditor reuses verifier conversation
-        context_registry.register_runtime_context(
+        context_registry.register_simulated_context(
             self.workspace,
             {"conversationId": v_cid, "transcriptPath": f"/brain/{v_cid}/transcript.jsonl", "artifactDirectoryPath": f"/brain/{v_cid}"},
             context_purpose="COUNTEREXAMPLE_AUDITOR",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            origin="SIMULATED_INTEGRATION",
         )
         status, details = context_registry.evaluate_context_isolation(
             self.workspace,
             verifier_purpose="COUNTEREXAMPLE_AUDITOR",
             predecessor_purposes=["BUILDER", "BLIND_FINAL_VERIFIER"],
+            allow_simulated=True,
         )
         self.assertEqual(status, "CONTEXT_REUSED")
 
     def test_c08_tampering_detection_in_context_registry(self):
         """S6S1-C08: Tampered hash chain in context-registry.jsonl is detected and fails verification."""
-        context_registry.register_runtime_context(
+        context_registry.register_simulated_context(
             self.workspace,
             {"conversationId": "conv-1", "transcriptPath": "/brain/conv-1/t.jsonl", "artifactDirectoryPath": "/brain/conv-1"},
             context_purpose="BUILDER",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            origin="SIMULATED_INTEGRATION",
         )
-        context_registry.register_runtime_context(
+        context_registry.register_simulated_context(
             self.workspace,
             {"conversationId": "conv-2", "transcriptPath": "/brain/conv-2/t.jsonl", "artifactDirectoryPath": "/brain/conv-2"},
             context_purpose="BLIND_FINAL_VERIFIER",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            origin="SIMULATED_INTEGRATION",
         )
         # Tamper with file
         reg_file = self.harness_dir / "context-registry.jsonl"
@@ -214,17 +223,16 @@ class TestStep6S1RuntimeContextProof(unittest.TestCase):
         """S6S1-C09: Packet hash deterministically binds runtime conversation ID and proof hash."""
         b_cid = "conv-builder-009"
         v_cid = "conv-verifier-009"
-        context_registry.register_runtime_context(
+        context_registry._ingest_antigravity_hook_context(
             self.workspace,
             {"conversationId": b_cid, "transcriptPath": f"/brain/{b_cid}/transcript.jsonl", "artifactDirectoryPath": f"/brain/{b_cid}"},
-            context_purpose="BUILDER",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            event_type="PreInvocation",
         )
-        verifier_entry = context_registry.register_runtime_context(
+        context_registry.create_context_expectation(self.workspace, expected_purpose="BLIND_FINAL_VERIFIER")
+        verifier_entry = context_registry._ingest_antigravity_hook_context(
             self.workspace,
-            {"conversationId": v_cid, "transcriptPath": f"/brain/{v_cid}/transcript.jsonl", "artifactDirectoryPath": f"/brain/{v_cid}"},
-            context_purpose="BLIND_FINAL_VERIFIER",
-            origin="ANTIGRAVITY_RUNTIME_HOOK",
+            {"conversationId": v_cid, "transcriptPath": f"/brain/{v_cid}/transcript.jsonl", "artifactDirectoryPath": f"/brain/{v_cid}", "invocationNum": 0},
+            event_type="PreInvocation",
         )
         packet = blind_verifier.compile_blind_verification_packet(self.workspace, ["REQ-001"])
         self.assertEqual(packet["contextIsolation"], "FRESH_CONTEXT_VERIFIED")

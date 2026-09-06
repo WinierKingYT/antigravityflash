@@ -51,6 +51,7 @@ PROTECTED_ARTIFACTS = {
     ".agent-harness/coverage.json",
     ".agent-harness/evidence.jsonl",
     ".agent-harness/context-registry.jsonl",
+    ".agent-harness/expected-context.json",
     "docs/ACCEPTANCE_TESTS.md",
     ".agent-harness/independent-audit.json",
     ".agent-harness/disagreements.json",
@@ -395,17 +396,23 @@ def evaluate_stop(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         allow_sim = bool(state.get("allowSimulatedContext", False))
         if has_high_or_critical and ind_audit_mandatory:
-            blind_iso, _ = context_registry.evaluate_context_isolation(
+            blind_iso, blind_det = context_registry.evaluate_context_isolation(
                 workspace, "BLIND_FINAL_VERIFIER", ["BUILDER"], allow_simulated=allow_sim
             )
             if blind_iso != "FRESH_CONTEXT_VERIFIED" and not (allow_sim and blind_iso == "FRESH_CONTEXT_SIMULATED"):
-                unresolved_gates.append(f"Blind Verifier context isolation not proven for HIGH/CRITICAL requirements ({blind_iso})")
+                unresolved_gates.append(f"Blind Verifier context isolation not proven for HIGH/CRITICAL requirements ({blind_iso}: {blind_det.get('reason', '')})")
+            elif not allow_sim:
+                if blind_det.get("runtimeOriginStatus") != "TRUSTED_HOOK_PATH" or blind_det.get("bindingStatus") not in {"EXPECTATION_CONSUMED", "EXPECTATION_ALREADY_BOUND"}:
+                    unresolved_gates.append(f"Blind Verifier context lacks trusted hook origin or consumed expectation (originStatus='{blind_det.get('runtimeOriginStatus')}', binding='{blind_det.get('bindingStatus')}')")
 
-            cx_iso, _ = context_registry.evaluate_context_isolation(
+            cx_iso, cx_det = context_registry.evaluate_context_isolation(
                 workspace, "COUNTEREXAMPLE_AUDITOR", ["BUILDER", "BLIND_FINAL_VERIFIER"], allow_simulated=allow_sim
             )
             if cx_iso != "FRESH_CONTEXT_VERIFIED" and not (allow_sim and cx_iso == "FRESH_CONTEXT_SIMULATED"):
-                unresolved_gates.append(f"Counterexample Auditor context isolation not proven for HIGH/CRITICAL requirements ({cx_iso})")
+                unresolved_gates.append(f"Counterexample Auditor context isolation not proven for HIGH/CRITICAL requirements ({cx_iso}: {cx_det.get('reason', '')})")
+            elif not allow_sim:
+                if cx_det.get("runtimeOriginStatus") != "TRUSTED_HOOK_PATH" or cx_det.get("bindingStatus") not in {"EXPECTATION_CONSUMED", "EXPECTATION_ALREADY_BOUND"}:
+                    unresolved_gates.append(f"Counterexample Auditor context lacks trusted hook origin or consumed expectation (originStatus='{cx_det.get('runtimeOriginStatus')}', binding='{cx_det.get('bindingStatus')}')")
 
         # Check Blind Verification
         if blind_file.exists() or ind_audit_mandatory:

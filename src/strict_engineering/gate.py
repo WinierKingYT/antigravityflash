@@ -30,6 +30,7 @@ try:
     from . import decision_events
     from . import decision_coverage
     from . import consistency_reviewer
+    from . import runtime_safety
 except (ImportError, ValueError):
     import kernel
     import fingerprint
@@ -53,6 +54,10 @@ except (ImportError, ValueError):
         decision_events = None
         decision_coverage = None
         consistency_reviewer = None
+    try:
+        import runtime_safety
+    except ImportError:
+        runtime_safety = None
 
 PROTECTED_ARTIFACTS = {
     ".agent-harness/original-request.md",
@@ -63,6 +68,8 @@ PROTECTED_ARTIFACTS = {
     ".agent-harness/evidence.jsonl",
     ".agent-harness/context-registry.jsonl",
     ".agent-harness/expected-context.json",
+    ".agent-harness/circuit-breaker.json",
+    ".agent-harness/runtime-events.jsonl",
     "docs/ACCEPTANCE_TESTS.md",
     ".agent-harness/independent-audit.json",
     ".agent-harness/disagreements.json",
@@ -297,14 +304,102 @@ def evaluate_stop(payload: Any) -> Dict[str, Any]:
     elif not isinstance(payload, dict):
         payload = {}
 
-    # Check for unrecoverable termination reasons (fatal errors, max steps, abort)
-    term_reason = payload.get("terminationReason", "")
-    if term_reason in {"error", "fatal_error", "max_steps", "user_abort", "abort", "cancelled", "user_cancelled", "aborted"}:
-        return {"decision": "allow"}
-
     workspace = resolve_workspace(payload)
     if not workspace or not kernel.is_harness_active(workspace):
         return {"decision": "allow"}
+
+    # Normalize termination information deterministically (V1.0.2)
+    if runtime_safety is not None:
+        term_class, term_details = runtime_safety.normalize_termination(payload)
+    else:
+        raw_tr = str(payload.get("terminationReason", "")).lower()
+        if raw_tr in {"error", "fatal_error", "max_steps", "max_steps_exceeded", "user_abort", "abort", "cancelled", "user_cancelled", "aborted"}:
+            return {"decision": "allow"}
+        term_class = "NORMAL_MODEL_STOP"
+        term_details = {"rawReason": raw_tr}
+
+    state = kernel.load_state(workspace)
+    conv_id = (
+        payload.get("conversationId")
+        or payload.get("conversation_id")
+        or payload.get("conversationID")
+        or ""
+    )
+
+    # USER_CANCELLED: allow stop, never auto continue, preserve state in pause
+    if runtime_safety is not None and term_class == runtime_safety.TerminationClass.USER_CANCELLED:
+        state["runtimeStatus"] = runtime_safety.RuntimeStatus.PAUSED_USER_CANCEL
+        state["pauseReason"] = "User cancellation requested"
+        kernel.save_state(workspace, state)
+        runtime_safety.record_runtime_event(
+            workspace_dir=workspace,
+            event_type="STOP_USER_CANCELLED",
+            termination_class=term_class,
+            raw_reason=term_details.get("rawReason"),
+            phase=state.get("phase"),
+            runtime_status=state.get("runtimeStatus"),
+            decision="allow",
+            conversation_id=conv_id,
+            state_fingerprint=runtime_safety.compute_state_progress_fingerprint(workspace),
+        )
+        return {"decision": "allow", "reason": "Execution cancelled by user. State preserved in pause."}
+
+    # MAX_STEPS: allow stop, never auto continue, preserve state in pause
+    if runtime_safety is not None and term_class == runtime_safety.TerminationClass.MAX_STEPS:
+        state["runtimeStatus"] = runtime_safety.RuntimeStatus.PAUSED_MAX_STEPS
+        state["pauseReason"] = "Maximum execution steps reached"
+        kernel.save_state(workspace, state)
+        runtime_safety.record_runtime_event(
+            workspace_dir=workspace,
+            event_type="STOP_MAX_STEPS",
+            termination_class=term_class,
+            raw_reason=term_details.get("rawReason"),
+            phase=state.get("phase"),
+            runtime_status=state.get("runtimeStatus"),
+            decision="allow",
+            conversation_id=conv_id,
+            state_fingerprint=runtime_safety.compute_state_progress_fingerprint(workspace),
+        )
+        return {"decision": "allow", "reason": "Maximum execution steps reached. Pausing without completion."}
+
+    # EXTERNAL_ERROR: allow stop, never auto continue, never false failure
+    if runtime_safety is not None and term_class == runtime_safety.TerminationClass.EXTERNAL_ERROR:
+        err_msg = term_details.get("rawError") or term_details.get("rawReason") or "External runtime failure"
+        state["runtimeStatus"] = runtime_safety.RuntimeStatus.PAUSED_EXTERNAL_ERROR
+        state["pauseReason"] = f"External error: {err_msg}"
+        kernel.save_state(workspace, state)
+        runtime_safety.record_runtime_event(
+            workspace_dir=workspace,
+            event_type="STOP_EXTERNAL_ERROR",
+            termination_class=term_class,
+            raw_reason=err_msg,
+            phase=state.get("phase"),
+            runtime_status=state.get("runtimeStatus"),
+            decision="allow",
+            conversation_id=conv_id,
+            state_fingerprint=runtime_safety.compute_state_progress_fingerprint(workspace),
+            details=term_details,
+        )
+        return {"decision": "allow", "reason": f"External runtime failure detected ({err_msg}). Pausing execution safely without false completion."}
+
+    # UNKNOWN_TERMINATION: conservative stop if abnormal token present
+    if runtime_safety is not None and term_class == runtime_safety.TerminationClass.UNKNOWN_TERMINATION:
+        raw_token = term_details.get("rawReason") or "unknown"
+        state["runtimeStatus"] = runtime_safety.RuntimeStatus.PAUSED_UNKNOWN
+        state["pauseReason"] = f"Unknown termination: {raw_token}"
+        kernel.save_state(workspace, state)
+        runtime_safety.record_runtime_event(
+            workspace_dir=workspace,
+            event_type="STOP_UNKNOWN_TERMINATION",
+            termination_class=term_class,
+            raw_reason=raw_token,
+            phase=state.get("phase"),
+            runtime_status=state.get("runtimeStatus"),
+            decision="allow",
+            conversation_id=conv_id,
+            state_fingerprint=runtime_safety.compute_state_progress_fingerprint(workspace),
+        )
+        return {"decision": "allow", "reason": f"Unknown abnormal termination token ({raw_token}). Halting safely."}
 
     state = kernel.load_state(workspace)
     unresolved_gates: List[str] = []
@@ -659,6 +754,48 @@ def evaluate_stop(payload: Any) -> Dict[str, Any]:
                 pass
 
     if unresolved_gates:
+        # Check Bounded Automatic-Continue Circuit Breaker (V1.0.2)
+        if runtime_safety is not None:
+            can_continue, cont_count, cb_reason = runtime_safety.evaluate_circuit_breaker(
+                workspace_dir=workspace,
+                conversation_id=conv_id,
+            )
+            if not can_continue:
+                # Circuit breaker tripped! Halt automatic continues
+                state["runtimeStatus"] = runtime_safety.RuntimeStatus.PAUSED_CIRCUIT_BREAKER
+                state["pauseReason"] = cb_reason
+                kernel.save_state(workspace, state)
+                runtime_safety.record_runtime_event(
+                    workspace_dir=workspace,
+                    event_type="CIRCUIT_BREAKER_TRIPPED",
+                    termination_class=term_class,
+                    raw_reason=cb_reason,
+                    phase=state.get("phase"),
+                    runtime_status=state.get("runtimeStatus"),
+                    decision="allow",
+                    continue_count=cont_count,
+                    conversation_id=conv_id,
+                    state_fingerprint=runtime_safety.compute_state_progress_fingerprint(workspace),
+                )
+                return {
+                    "decision": "allow",
+                    "reason": f"Strict Engineering Circuit Breaker TRIPPED: {cb_reason} Pausing execution.",
+                }
+            else:
+                # Bounded continue permitted
+                runtime_safety.record_runtime_event(
+                    workspace_dir=workspace,
+                    event_type="AUTO_CONTINUE_ISSUED",
+                    termination_class=term_class,
+                    raw_reason=cb_reason,
+                    phase=state.get("phase"),
+                    runtime_status=state.get("runtimeStatus", "RUNNING"),
+                    decision="continue",
+                    continue_count=cont_count,
+                    conversation_id=conv_id,
+                    state_fingerprint=runtime_safety.compute_state_progress_fingerprint(workspace),
+                )
+
         issues_summary = "\n- " + "\n- ".join(unresolved_gates)
         return {
             "decision": "continue",
@@ -668,7 +805,21 @@ def evaluate_stop(payload: Any) -> Dict[str, Any]:
     # Mark state as complete
     state["phase"] = "COMPLETE"
     state["active"] = False
+    state["runtimeStatus"] = runtime_safety.RuntimeStatus.COMPLETED if runtime_safety is not None else "COMPLETED"
     state["completedAt"] = kernel.utc_now_iso()
     kernel.save_state(workspace, state)
+
+    if runtime_safety is not None:
+        runtime_safety.reset_circuit_breaker(workspace)
+        runtime_safety.record_runtime_event(
+            workspace_dir=workspace,
+            event_type="STOP_COMPLETED",
+            termination_class=term_class,
+            phase="COMPLETE",
+            runtime_status="COMPLETED",
+            decision="allow",
+            conversation_id=conv_id,
+            state_fingerprint=runtime_safety.compute_state_progress_fingerprint(workspace),
+        )
 
     return {"decision": "allow"}

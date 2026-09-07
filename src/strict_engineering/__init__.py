@@ -18,8 +18,9 @@ from . import consistency_reviewer
 from . import decision_coverage
 from . import requirement_generator
 from . import decision_engine
+from . import runtime_safety
 
-__version__ = "1.0.1"
+__version__ = "1.0.2"
 
 
 

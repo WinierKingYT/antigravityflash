@@ -13,7 +13,7 @@ import hashlib
 import datetime
 import subprocess
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple, Set
+from typing import Dict, Any, List, Optional, Tuple, Set, Union
 
 try:
     from . import fingerprint
@@ -232,6 +232,8 @@ def initialize_harness(
         "active": True,
         "schemaVersion": "5.1.0",
         "phase": "SPECIFICATION",
+        "runtimeStatus": "RUNNING",
+        "pauseReason": None,
         "specLocked": False,
         "acceptanceLocked": False,
         "originalRequestSha256": orig_sha,
@@ -929,3 +931,15 @@ def scan_for_placeholders(workspace_dir: Path) -> List[Dict[str, Any]]:
                 except Exception:
                     pass
     return placeholders
+
+
+def resume_execution(workspace_dir: Union[str, Path]) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Deterministic resumption of an active/paused Strict Engineering project.
+    Delegates to runtime_safety.resume_harness.
+    """
+    try:
+        from . import runtime_safety
+    except (ImportError, ValueError):
+        import runtime_safety
+    return runtime_safety.resume_harness(workspace_dir)

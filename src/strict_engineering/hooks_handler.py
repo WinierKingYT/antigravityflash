@@ -94,10 +94,31 @@ def main():
                 "reason": f"PreToolUse gate encountered internal error: {str(ex)}. Failing closed to protect harness integrity."
             }))
         elif action in {"stop"}:
-            # Block completion when gate crashes to prevent unverified exit
+            # Block false complete without creating endless retry loop (Section 10)
+            if workspace and kernel.is_harness_active(workspace):
+                try:
+                    st = kernel.load_state(workspace)
+                    st["runtimeStatus"] = "PAUSED_HOOK_ERROR"
+                    st["pauseReason"] = f"Hook internal error: {str(ex)}"
+                    kernel.save_state(workspace, st)
+                    try:
+                        import runtime_safety
+                        runtime_safety.record_runtime_event(
+                            workspace_dir=workspace,
+                            event_type="HOOK_INTERNAL_ERROR",
+                            termination_class="HOOK_INTERNAL_ERROR",
+                            raw_reason=str(ex),
+                            phase=st.get("phase"),
+                            runtime_status="PAUSED_HOOK_ERROR",
+                            decision="allow",
+                        )
+                    except Exception:
+                        pass
+                except Exception:
+                    pass
             print(json.dumps({
-                "decision": "continue",
-                "reason": f"Completion gate evaluation encountered internal error: {str(ex)}. Completion blocked."
+                "decision": "allow",
+                "reason": f"Completion gate encountered internal error: {str(ex)}. Pausing execution safely without false completion."
             }))
         else:
             print(json.dumps({}))

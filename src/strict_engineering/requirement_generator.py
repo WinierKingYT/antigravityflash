@@ -24,6 +24,7 @@ try:
     from . import consistency_reviewer
     from . import decision_coverage
     from . import decision_events
+    from . import acceptance_protocol
 except (ImportError, ValueError):
     try:
         import kernel
@@ -36,6 +37,7 @@ except (ImportError, ValueError):
         import consistency_reviewer
         import decision_coverage
         import decision_events
+        import acceptance_protocol
     except ImportError:
         kernel = None
         risk_engine = None
@@ -47,6 +49,7 @@ except (ImportError, ValueError):
         consistency_reviewer = None
         decision_coverage = None
         decision_events = None
+        acceptance_protocol = None
 
 
 def utc_now_iso() -> str:
@@ -99,8 +102,8 @@ def record_suggestion_sandbox(
 
     sug = {
         "id": sug_id,
-        "title": title,
-        "description": description,
+        "title": title.strip(),
+        "description": description.strip(),
         "sourceConcernId": source_concern_id,
         "status": "SANDBOXED",
         "createdAt": utc_now_iso(),
@@ -113,8 +116,11 @@ def record_suggestion_sandbox(
 
 def compute_requirement_contract_fingerprint(req: Dict[str, Any]) -> str:
     """
-    Compute a deterministic SHA-256 hash over the requirement's semantic fields:
-    title, description, category, acceptanceCriteria (sorted/normalized), verificationContract.
+    Requirement Contract Fingerprint V2 (RC2 canonical specification).
+    Compute a deterministic SHA-256 hash binding all authority-relevant semantic fields:
+    title, description, category, acceptanceCriteria (sorted/normalized),
+    sourceIntentIds, sourceDecisionIds, sourceConcernIds, riskLevel, verificationContract.
+    Timestamps (createdAt, updatedAt, lockedAt) are strictly excluded.
     """
     title = str(req.get("title", "")).strip()
     desc = str(req.get("description", "")).strip()
@@ -126,11 +132,48 @@ def compute_requirement_contract_fingerprint(req: Dict[str, Any]) -> str:
         norm_crits = [str(crit_list).strip()]
     vcontract = str(req.get("verificationContract", "")).strip()
 
+    sources = req.get("sources", [])
+    if not isinstance(sources, list):
+        sources = [str(sources)]
+
+    source_intents = req.get("sourceIntentIds")
+    if source_intents is None:
+        source_intents = sorted(set(
+            [str(s).strip() for s in sources if str(s).startswith("INTENT-")] +
+            ([str(req["intentId"]).strip()] if req.get("intentId") else [])
+        ))
+    else:
+        source_intents = sorted(str(i).strip() for i in source_intents if str(i).strip())
+
+    source_decisions = req.get("sourceDecisionIds")
+    if source_decisions is None:
+        source_decisions = sorted(set(
+            [str(s).strip() for s in sources if str(s).startswith("DEC-")] +
+            ([str(req["decisionId"]).strip()] if req.get("decisionId") else [])
+        ))
+    else:
+        source_decisions = sorted(str(d).strip() for d in source_decisions if str(d).strip())
+
+    source_concerns = req.get("sourceConcernIds")
+    if source_concerns is None:
+        source_concerns = sorted(set(
+            [str(s).strip() for s in sources if str(s).startswith("CONCERN-")] +
+            ([str(req["concernId"]).strip()] if req.get("concernId") else [])
+        ))
+    else:
+        source_concerns = sorted(str(c).strip() for c in source_concerns if str(c).strip())
+
+    risk = str(req.get("riskLevel", "MEDIUM")).strip().upper()
+
     canonical_obj = {
         "title": title,
         "description": desc,
         "category": cat,
         "acceptanceCriteria": norm_crits,
+        "sourceIntentIds": source_intents,
+        "sourceDecisionIds": source_decisions,
+        "sourceConcernIds": source_concerns,
+        "riskLevel": risk,
         "verificationContract": vcontract,
     }
     encoded = json.dumps(canonical_obj, sort_keys=True).encode("utf-8")
@@ -142,8 +185,8 @@ def validate_requirement_quality(req: Dict[str, Any]) -> Tuple[bool, List[str]]:
     Validate requirement quality against strict standards:
     - Non-empty title (len >= 5), not purely placeholder/tautology ('Implement DEC-xxx')
     - Non-empty description (len >= 10), not purely generic placeholder
-    - Non-empty acceptance criteria, zero tautological criteria ('Implementation satisfies X', 'Selected option ... is verified')
-    - Zero generic placeholders in acceptance criteria ('expected behavior', 'behaves according to', 'works correctly', 'appropriate error', 'as expected')
+    - When acceptanceStatus is PENDING, empty acceptanceCriteria is valid awaiting Test Oracle
+    - When acceptance criteria are present: non-empty, zero tautological criteria, zero generic placeholders
     - Returns (is_valid, errors)
     """
     errors: List[str] = []
@@ -160,12 +203,16 @@ def validate_requirement_quality(req: Dict[str, Any]) -> Tuple[bool, List[str]]:
     if len(desc) < 10:
         errors.append("Requirement description is too short (must be >= 10 chars).")
 
+    criteria = req.get("acceptanceCriteria")
+    # If acceptanceStatus is PENDING, empty criteria is valid awaiting Test Oracle
+    if req.get("acceptanceStatus") == "PENDING" and (criteria is None or criteria == []):
+        return len(errors) == 0, errors
+
     placeholder_pattern = re.compile(
         r"\b(expected\s+behavior|behaves\s+according\s+to|implementation\s+satisfies|works\s+correctly|appropriate\s+error|as\s+expected)\b",
         re.IGNORECASE,
     )
 
-    criteria = req.get("acceptanceCriteria")
     if not criteria or not isinstance(criteria, list):
         errors.append("Requirement must have at least one acceptance criterion.")
     else:
@@ -285,7 +332,6 @@ def compile_requirements_from_intents(
         req_title = f"{'Constraint' if is_constraint else 'Requirement'}: {itext[:60]}"
         req_desc = f"The system shall implement the explicit user {'constraint' if is_constraint else 'requirement'}: {itext}."
         cat = "IMPLEMENTATION_CONSTRAINT" if is_constraint else "CORE_BEHAVIOR"
-        criteria = generate_behavioral_acceptance_criteria(req_title, itext, cat)
 
         # Dynamic risk evaluation (Fact H & RC-REQ-04)
         r_level = "MEDIUM"
@@ -298,27 +344,36 @@ def compile_requirements_from_intents(
         elif concern_mod is not None and hasattr(concern_mod, "evaluate_concern_risk"):
             r_level, _ = concern_mod.evaluate_concern_risk(req_title, req_desc, cat)
 
+        ex_r = existing_by_intent.get(iid, {})
+        ex_crits = ex_r.get("acceptanceCriteria", [])
+        ex_acc_status = ex_r.get("acceptanceStatus", "PENDING" if not ex_crits else "LOCKED")
+        ex_acc_locked = ex_r.get("acceptanceLocked", bool(ex_crits))
+
         req_obj = {
-            "id": "TEMP",
+            "id": ex_r.get("id", "TEMP"),
             "title": req_title,
             "description": req_desc,
             "category": cat,
-            "status": "DISCOVERED",
+            "status": ex_r.get("status", "DISCOVERED"),
             "required": True,
             "riskLevel": r_level,
             "decisionId": None,
             "concernId": None,
             "intentId": iid,
             "sources": [iid],
+            "sourceIntentIds": [iid],
+            "sourceDecisionIds": [],
+            "sourceConcernIds": [],
             "authority": it.get("provenance", "USER_DIRECT"),
-            "acceptanceCriteria": criteria,
+            "acceptanceCriteria": ex_crits,
+            "acceptanceStatus": ex_acc_status,
+            "acceptanceLocked": ex_acc_locked,
             "verificationContract": f"Verify behavioral compliance of requirement according to user statement {iid}",
-            "createdAt": utc_now_iso(),
+            "createdAt": ex_r.get("createdAt", utc_now_iso()),
             "updatedAt": utc_now_iso(),
         }
 
         if iid in existing_by_intent:
-            ex_r = existing_by_intent[iid]
             req_id = ex_r.get("id", next_req_id())
             old_status = ex_r.get("status", "DISCOVERED")
             old_fp = ex_r.get("contractFingerprint")
@@ -361,6 +416,12 @@ def compile_requirements_from_intents(
         with open(temp_file, "w", encoding="utf-8") as f:
             json.dump(merged_list, f, indent=2, sort_keys=True)
         os.replace(temp_file, r_file)
+
+    if acceptance_protocol is not None and hasattr(acceptance_protocol, "create_acceptance_requests_for_all"):
+        try:
+            acceptance_protocol.create_acceptance_requests_for_all(ws)
+        except Exception:
+            pass
 
     return True, f"Successfully compiled {len(compiled_intent_reqs)} direct requirements from intents", compiled_intent_reqs
 
@@ -505,9 +566,7 @@ def compile_requirements_from_decisions(
                 sub_title = sub.get("title", f"{d.get('title')} - Part {s_idx + 1}")
                 sub_opt = sub.get("chosenOption", d.get("chosenOption", ""))
                 sub_req_id = next_req_id()
-                sub_criteria = generate_behavioral_acceptance_criteria(
-                    sub_title, sub_opt, associated_concern.get("category", "CORE_BEHAVIOR")
-                )
+                sub_intent_ref = associated_concern.get("source", {}).get("reference")
                 sub_req_obj = {
                     "id": sub_req_id,
                     "title": sub_title,
@@ -518,10 +577,15 @@ def compile_requirements_from_decisions(
                     "riskLevel": associated_concern.get("riskLevel", "MEDIUM"),
                     "decisionId": did,
                     "concernId": cid,
-                    "intentId": associated_concern.get("source", {}).get("reference", "ORIGINAL_INTENT"),
+                    "intentId": sub_intent_ref or "ORIGINAL_INTENT",
                     "sources": [did] + ([cid] if cid else []),
+                    "sourceIntentIds": [sub_intent_ref] if sub_intent_ref else [],
+                    "sourceDecisionIds": [did],
+                    "sourceConcernIds": [cid] if cid else [],
                     "authority": d.get("authority", "USER_DIRECT"),
-                    "acceptanceCriteria": sub_criteria,
+                    "acceptanceCriteria": [],
+                    "acceptanceStatus": "PENDING",
+                    "acceptanceLocked": False,
                     "verificationContract": f"Verify behavioral compliance of {sub_req_id} according to decision {did}",
                     "createdAt": utc_now_iso(),
                     "updatedAt": utc_now_iso(),
@@ -536,9 +600,10 @@ def compile_requirements_from_decisions(
             continue
 
         # Standard 1:1 cardinality
+        existing_target = dec_to_existing_req.get(did, {})
         if did in dec_to_existing_req:
-            req_id = dec_to_existing_req[did].get("id", next_req_id())
-            prev_status = dec_to_existing_req[did].get("status", "DISCOVERED")
+            req_id = existing_target.get("id", next_req_id())
+            prev_status = existing_target.get("status", "DISCOVERED")
         else:
             req_id = next_req_id()
             prev_status = "DISCOVERED"
@@ -564,7 +629,10 @@ def compile_requirements_from_decisions(
 
         intent_ref = associated_concern.get("source", {}).get("reference", "ORIGINAL_INTENT")
         category = associated_concern.get("category", "CORE_BEHAVIOR")
-        criteria = generate_behavioral_acceptance_criteria(title, chosen_opt, category)
+
+        ex_crits = existing_target.get("acceptanceCriteria", [])
+        ex_acc_status = existing_target.get("acceptanceStatus", "PENDING" if not ex_crits else "LOCKED")
+        ex_acc_locked = existing_target.get("acceptanceLocked", bool(ex_crits))
 
         req_obj = {
             "id": req_id,
@@ -578,29 +646,26 @@ def compile_requirements_from_decisions(
             "concernId": cid,
             "intentId": intent_ref,
             "sources": [did] + ([cid] if cid else []),
+            "sourceIntentIds": [intent_ref] if intent_ref else [],
+            "sourceDecisionIds": [did],
+            "sourceConcernIds": [cid] if cid else [],
             "authority": d.get("authority", "USER_DIRECT"),
-            "acceptanceCriteria": criteria,
+            "acceptanceCriteria": ex_crits,
+            "acceptanceStatus": ex_acc_status,
+            "acceptanceLocked": ex_acc_locked,
             "verificationContract": f"Verify behavioral compliance of {req_id} according to decision {did}",
-            "createdAt": utc_now_iso(),
+            "createdAt": existing_target.get("createdAt", utc_now_iso()),
             "updatedAt": utc_now_iso(),
         }
 
         req_obj["contractFingerprint"] = compute_requirement_contract_fingerprint(req_obj)
 
         val_ok, val_errs = validate_requirement_quality(req_obj)
-        if not val_ok:
-            # Fallback ensure non-tautological valid criteria
-            req_obj["acceptanceCriteria"] = [
-                f"Given a valid operational runtime environment, When executing operations under '{title}', Then the system applies the configured '{chosen_opt}' specification and produces deterministic outputs.",
-                f"Given abnormal state, When '{title}' experiences failure, Then error diagnostics are recorded without data corruption."
-            ]
-            req_obj["contractFingerprint"] = compute_requirement_contract_fingerprint(req_obj)
-
-        d.setdefault("affectedRequirements", [])
-        if req_id not in d["affectedRequirements"]:
-            d["affectedRequirements"].append(req_id)
-
-        compiled_reqs.append(req_obj)
+        if val_ok:
+            d.setdefault("affectedRequirements", [])
+            if req_id not in d["affectedRequirements"]:
+                d["affectedRequirements"].append(req_id)
+            compiled_reqs.append(req_obj)
 
     # Save decisions with updated affectedRequirements
     if decision_mod is not None:
@@ -651,20 +716,20 @@ def compile_requirements_from_decisions(
             json.dump(final_merged_reqs, f, indent=2, sort_keys=True)
         os.replace(temp_file, r_file)
 
-    # Sync decision graph and coverage matrix
+    # Sync decision graph and coverage matrix (FAIL CLOSED on errors)
     if decision_graph is not None:
         try:
             decision_graph.sync_decision_graph(ws)
-        except Exception:
-            pass
+        except Exception as e:
+            return False, f"Critical sync failed (decision_graph): {e}", []
 
     if decision_coverage is not None:
         try:
             decision_coverage.sync_decision_coverage(ws)
-        except Exception:
-            pass
+        except Exception as e:
+            return False, f"Critical sync failed (decision_coverage): {e}", []
 
-    # Record event in ledger
+    # Record event in ledger (FAIL CLOSED on errors)
     if decision_events is not None:
         try:
             decision_events.record_decision_event(
@@ -677,6 +742,13 @@ def compile_requirements_from_decisions(
                 },
                 actor="requirement-generator",
             )
+        except Exception as e:
+            return False, f"Critical sync failed (decision_events): {e}", []
+
+    # Auto-emit acceptance requests for pending requirements
+    if acceptance_protocol is not None and hasattr(acceptance_protocol, "create_acceptance_requests_for_all"):
+        try:
+            acceptance_protocol.create_acceptance_requests_for_all(ws)
         except Exception:
             pass
 

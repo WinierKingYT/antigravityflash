@@ -268,7 +268,7 @@ class TestV1RCSemanticDiscovery(unittest.TestCase):
             ],
         }
 
-        success, msg, res = self.engine.ingest_agent_proposal(agent_proposal)
+        success, msg, res = self.engine.ingest_agent_proposal(agent_proposal, allow_simulated=True)
         self.assertTrue(success, f"Agent proposal ingestion failed: {msg}")
         self.assertEqual(res.get("discoveryOrigin"), "AGENT_PROPOSAL")
 
@@ -353,7 +353,7 @@ class TestV1RCSemanticDiscovery(unittest.TestCase):
             ],
         }
 
-        success, msg, res = discovery_protocol.ingest_semantic_concern_proposal(self.ws, proposal)
+        success, msg, res = discovery_protocol.ingest_semantic_concern_proposal(self.ws, proposal, allow_simulated=True)
         self.assertTrue(success, f"Ingestion failed: {msg}")
 
         events = decision_events.load_decision_events(self.ws)
@@ -611,9 +611,9 @@ class TestV1RCSemanticDiscovery(unittest.TestCase):
         self.assertIsNotNone(state_conc)
         opt_titles = [o["title"] for o in state_conc.get("candidateOptions", [])]
 
-        # Options must be game-specific behavioral options, not SQLite/Postgres!
-        self.assertTrue(any("slot" in t.lower() or "checkpoint" in t.lower() for t in opt_titles))
-        self.assertTrue(any("autosave" in t.lower() for t in opt_titles))
+        # In RC2, heuristic seeds do not prescribe technology or mechanism options
+        self.assertEqual(opt_titles, [])
+        self.assertEqual(state_conc.get("discoveryOrigin"), "HEURISTIC_SEED")
 
     def test_metamorphic_discovery_editor_domain(self):
         """Document editor discovers editor-appropriate behavioral options (continuous auto-save, revision log)."""
@@ -624,7 +624,9 @@ class TestV1RCSemanticDiscovery(unittest.TestCase):
         self.assertIsNotNone(state_conc)
         opt_titles = [o["title"] for o in state_conc.get("candidateOptions", [])]
 
-        self.assertTrue(any("auto-save" in t.lower() or "revision journal" in t.lower() for t in opt_titles))
+        # In RC2, heuristic seeds do not prescribe technology or mechanism options
+        self.assertEqual(opt_titles, [])
+        self.assertEqual(state_conc.get("discoveryOrigin"), "HEURISTIC_SEED")
 
     def test_false_positive_auth_elimination_for_single_user_tools(self):
         """Single-user offline tools must NOT generate CRITICAL authorization concerns."""

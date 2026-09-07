@@ -449,7 +449,11 @@ def validate_decision_graph(graph_data: Dict[str, Any]) -> Tuple[bool, List[str]
                 or ndata.get("sourceDecision")
                 or ndata.get("concernId")
                 or ndata.get("sourceConcern")
+                or ndata.get("intentId")
+                or ndata.get("sourceIntentIds")
+                or ndata.get("sources")
                 or ndata.get("provenance")
+                or ndata.get("authority")
             )
 
             if not has_incoming_trace and not has_data_trace:

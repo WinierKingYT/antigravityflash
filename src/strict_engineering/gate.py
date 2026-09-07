@@ -82,6 +82,11 @@ PROTECTED_ARTIFACTS = {
     ".agent-harness/discovery/request.json",
     ".agent-harness/discovery/proposals.json",
     ".agent-harness/discovery/status.json",
+    ".agent-harness/discovery/seeds.json",
+    ".agent-harness/discovery/evidence.json",
+    ".agent-harness/discovery/discovery-status.json",
+    ".agent-harness/acceptance/requests.json",
+    ".agent-harness/acceptance/proposals.json",
 }
 
 # Shell write commands matching PowerShell, cmd, Python inline, and file manipulation tools
@@ -138,7 +143,11 @@ def is_write_safe(
     else:
         rel_path = str(target_path).replace("\\", "/")
 
-    if rel_path in PROTECTED_ARTIFACTS or rel_path.startswith(".agent-harness/discovery/"):
+    if (
+        rel_path in PROTECTED_ARTIFACTS
+        or rel_path.startswith(".agent-harness/discovery/")
+        or rel_path.startswith(".agent-harness/acceptance/")
+    ):
         return False, f"Direct write denied: '{rel_path}' is a protected harness artifact."
     return True, "Allowed"
 
@@ -214,7 +223,12 @@ def evaluate_pre_tool_use(payload: Dict[str, Any]) -> Dict[str, Any]:
         # Inspect if command writes to protected files
         for protected_rel in PROTECTED_ARTIFACTS:
             protected_name = Path(protected_rel).name
-            if protected_name in cmd_line or protected_rel in cmd_line:
+            if (
+                protected_name in cmd_line
+                or protected_rel in cmd_line
+                or ".agent-harness/acceptance" in cmd_line
+                or ".agent-harness/discovery" in cmd_line
+            ):
                 for pat in SHELL_WRITE_PATTERNS:
                     if pat.search(cmd_line):
                         return {

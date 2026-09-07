@@ -83,10 +83,7 @@ class DecisionEngine:
 
         # 1b. Create Discovery Protocol Request
         if discovery_protocol is not None and hasattr(discovery_protocol, "create_discovery_request"):
-            try:
-                discovery_protocol.create_discovery_request(self.ws, frame_data)
-            except Exception:
-                pass
+            discovery_protocol.create_discovery_request(self.ws, frame_data)
 
         decision_events.record_decision_event(
             workspace_dir=self.ws,
@@ -100,21 +97,24 @@ class DecisionEngine:
             actor="spec-architect",
         )
 
-        # 2. Extract Concerns
-        candidate_concerns = concern_mod.extract_candidate_concerns_from_frame(frame_data)
-        concern_mod.save_concerns(self.ws, candidate_concerns)
+        # 2. Extract Heuristic Seeds (Non-authoritative, preserved in discovery/seeds.json)
+        heuristic_seeds = concern_mod.propose_heuristic_seeds(frame_data)
+        concern_mod.save_heuristic_seeds(self.ws, heuristic_seeds)
 
-        for c in candidate_concerns:
+        # Canonical concerns remain empty until ingested via semantic discovery protocol
+        concern_mod.save_concerns(self.ws, [])
+
+        for s in heuristic_seeds:
             decision_events.record_decision_event(
                 workspace_dir=self.ws,
-                event_type="CONCERN_DISCOVERED",
+                event_type="HEURISTIC_SEED_DISCOVERED",
                 payload={
-                    "concernId": c["id"],
-                    "category": c.get("category"),
-                    "title": c.get("title"),
-                    "riskLevel": c.get("riskLevel"),
+                    "seedId": s["id"],
+                    "category": s.get("category"),
+                    "title": s.get("title"),
+                    "riskLevel": s.get("riskLevel"),
                 },
-                actor="spec-architect",
+                actor="heuristic_engine",
             )
 
         # 3. Sync initial artifacts
@@ -124,13 +124,19 @@ class DecisionEngine:
 
         return {
             "frame": frame_data,
-            "concerns": candidate_concerns,
+            "concerns": heuristic_seeds,
+            "seeds": heuristic_seeds,
             "status": status_data,
             "coverage": cov_data,
             "graph": graph_data,
         }
 
-    def ingest_agent_proposal(self, proposal_data: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
+    def ingest_agent_proposal(
+        self,
+        proposal_data: Dict[str, Any],
+        review_data: Optional[Dict[str, Any]] = None,
+        allow_simulated: bool = False,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
         """
         Ingest and validate an external agent proposal (from spec-architect) into the workspace.
         Syncs graph, status, and coverage upon acceptance.
@@ -138,7 +144,9 @@ class DecisionEngine:
         if discovery_protocol is None or not hasattr(discovery_protocol, "ingest_semantic_concern_proposal"):
             return False, "Discovery protocol module unavailable", {}
 
-        success, msg, res = discovery_protocol.ingest_semantic_concern_proposal(self.ws, proposal_data)
+        success, msg, res = discovery_protocol.ingest_semantic_concern_proposal(
+            self.ws, proposal_data, review_data=review_data, allow_simulated=allow_simulated
+        )
         first_c = res[0] if (res and isinstance(res, list)) else (res if isinstance(res, dict) else {})
         if success:
             decision_graph.sync_decision_graph(self.ws)
@@ -300,8 +308,19 @@ class DecisionEngine:
         """
         concerns_list = concern_mod.load_concerns(self.ws)
         target_concern = next((c for c in concerns_list if c.get("id") == concern_id), None)
+        from_seeds = False
+        if not target_concern:
+            seeds_list = concern_mod.load_heuristic_seeds(self.ws)
+            target_concern = next((s for s in seeds_list if s.get("id") == concern_id), None)
+            if target_concern:
+                from_seeds = True
+
         if not target_concern:
             raise ValueError(f"Concern '{concern_id}' not found in workspace")
+
+        if from_seeds and not any(c.get("id") == concern_id for c in concerns_list):
+            concerns_list.append(target_concern)
+            concern_mod.save_concerns(self.ws, concerns_list)
 
         candidate_opts = target_concern.get("candidateOptions")
         if not candidate_opts:

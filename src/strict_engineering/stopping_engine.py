@@ -122,6 +122,7 @@ def evaluate_stopping_conditions(
     asked_questions: Optional[List[Dict[str, Any]]] = None,
     threshold: float = DEFAULT_MIN_QUESTION_UTILITY,
     max_questions: int = MAX_QUESTIONS_PER_SESSION,
+    workspace_dir: Optional[Union[str, Path]] = None,
 ) -> Dict[str, Any]:
     """
     Evaluate stopping conditions for decision discovery.
@@ -193,6 +194,51 @@ def evaluate_stopping_conditions(
     # Determine whether discovery can stop and proceed to spec
     can_proceed = False
     reason = ""
+
+    # Check semantic discovery gate: if heuristic seeds exist and status is HEURISTIC_DISCOVERY_ONLY
+    if workspace_dir:
+        ws_p = Path(workspace_dir).resolve()
+        seeds_file = ws_p / ".agent-harness" / "discovery" / "seeds.json"
+        if seeds_file.exists():
+            try:
+                with open(seeds_file, "r", encoding="utf-8") as f:
+                    seeds_data = json.load(f)
+            except Exception:
+                seeds_data = []
+            if seeds_data and isinstance(seeds_data, list):
+                status_file = ws_p / ".agent-harness" / "discovery" / "discovery-status.json"
+                if not status_file.exists():
+                    status_file = ws_p / ".agent-harness" / "discovery" / "status.json"
+                disc_status_val = "HEURISTIC_DISCOVERY_ONLY"
+                if status_file.exists():
+                    try:
+                        with open(status_file, "r", encoding="utf-8") as f:
+                            s_data = json.load(f)
+                            disc_status_val = s_data.get("status", "HEURISTIC_DISCOVERY_ONLY")
+                    except Exception:
+                        pass
+                has_high_or_crit_seeds = any(str(s.get("riskLevel", "")).upper() in ("HIGH", "CRITICAL") for s in seeds_data)
+                if disc_status_val == "HEURISTIC_DISCOVERY_ONLY" and (has_high_or_crit_seeds or len(c_list) == 0):
+                    can_proceed = False
+                    reason = "Semantic discovery not yet executed: discovery status is HEURISTIC_DISCOVERY_ONLY with unresolved architectural seeds"
+                    return {
+                        "canProceedToSpec": False,
+                        "reason": reason,
+                        "unresolvedConcernsCount": len(unresolved),
+                        "resolvedConcernsCount": len(resolved),
+                        "totalConcernsCount": len(c_list),
+                        "blockingConcerns": blocking_concern_ids,
+                        "highestRemainingUtility": round(highest_utility, 4),
+                        "stoppingThreshold": threshold,
+                        "stoppingConditionsMet": {
+                            "noUnresolvedConcerns": False,
+                            "criticalConcernsResolved": False,
+                            "remainingUtilityBelowThreshold": False,
+                            "graphValid": graph_valid,
+                            "sessionFatigueReached": fatigue_reached,
+                        },
+                        "timestamp": utc_now_iso(),
+                    }
 
     if not graph_valid:
         can_proceed = False
@@ -289,6 +335,7 @@ def sync_decision_status(
         asked_questions=asked_questions,
         threshold=threshold,
         max_questions=max_questions,
+        workspace_dir=ws,
     )
 
     save_decision_status(ws, status_data)

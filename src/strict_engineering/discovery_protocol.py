@@ -28,6 +28,7 @@ try:
     from . import decision_coverage
     from . import decision_events
     from . import risk_engine
+    from . import context_registry
 except (ImportError, ValueError):
     try:
         import frame as frame_mod
@@ -39,6 +40,7 @@ except (ImportError, ValueError):
         import decision_coverage
         import decision_events
         import risk_engine
+        import context_registry
     except ImportError:
         frame_mod = None
         concern_mod = None
@@ -49,6 +51,7 @@ except (ImportError, ValueError):
         decision_coverage = None
         decision_events = None
         risk_engine = None
+        context_registry = None
 
 DISCOVERY_SCHEMA_VERSION = "7.2"
 
@@ -175,7 +178,7 @@ def create_discovery_request(
 
 def validate_semantic_concern_proposal(
     proposal: Dict[str, Any],
-    request_data: Dict[str, Any],
+    request_data: Optional[Dict[str, Any]] = None,
 ) -> Tuple[bool, List[str], List[Dict[str, Any]]]:
     """
     Deterministically validate Spec Architect concern proposal against request data.
@@ -190,6 +193,9 @@ def validate_semantic_concern_proposal(
       8. No active duplicate concerns
     Returns: (is_valid, validation_errors, validated_concerns)
     """
+    if request_data is None:
+        request_data = {}
+
     errors: List[str] = []
     validated_concerns: List[Dict[str, Any]] = []
 
@@ -257,12 +263,13 @@ def validate_semantic_concern_proposal(
         if not src_intent_ids or not isinstance(src_intent_ids, list):
             c_errors.append(f"{pid}: 'sourceIntentIds' must be a non-empty list of intent IDs")
         else:
-            for sid in src_intent_ids:
-                if sid not in intent_map:
-                    c_errors.append(f"{pid}: References non-existent INTENT ID '{sid}'")
+            if intent_map:
+                for sid in src_intent_ids:
+                    if sid not in intent_map:
+                        c_errors.append(f"{pid}: References non-existent INTENT ID '{sid}'")
 
         # Semantic Grounding Check (REQ-007)
-        if src_intent_ids and not c_errors:
+        if src_intent_ids and intent_map and not c_errors:
             ref_texts = " ".join([str(intent_map[sid].get("text", "")).lower() for sid in src_intent_ids if sid in intent_map])
             ref_tokens = {w for w in re.findall(r"\b[a-z]{4,}\b", ref_texts)}
             c_tokens = {w for w in re.findall(r"\b[a-z]{4,}\b", c_corpus)}
@@ -299,7 +306,7 @@ def validate_semantic_concern_proposal(
                         tech_match = re.search(pat, opt_title) or re.search(pat, opt_desc)
                         tech_word = tech_match.group(0) if tech_match else ""
                         if tech_word and tech_word not in intent_corpus:
-                            c_errors.append(f"{pid}: PRODUCT concern candidate option prescribes implementation technology '{tech_word}' instead of product behavior")
+                            c_errors.append(f"{pid}: Forbidden technology prescription: PRODUCT concern candidate option prescribes implementation technology '{tech_word}' instead of product behavior")
                             break
 
         # Duplicate check
@@ -319,17 +326,88 @@ def validate_semantic_concern_proposal(
     return len(errors) == 0, errors, validated_concerns
 
 
+def compute_proposal_hash(proposal_data: Dict[str, Any]) -> str:
+    """
+    Compute a deterministic SHA-256 hash over the canonical semantic content of a proposal:
+    schemaVersion, discoveryId, concerns (sorted/normalized without volatile fields).
+    """
+    if not isinstance(proposal_data, dict):
+        return hashlib.sha256(b"").hexdigest()
+
+    raw_concerns = proposal_data.get("concerns", [])
+    if not isinstance(raw_concerns, list) and "title" in proposal_data:
+        raw_concerns = [proposal_data]
+
+    norm_concerns = []
+    for c in raw_concerns:
+        if isinstance(c, dict):
+            norm_opts = []
+            for opt in c.get("candidateOptions", []):
+                if isinstance(opt, dict):
+                    norm_opts.append({
+                        "id": str(opt.get("id", "")).strip(),
+                        "title": str(opt.get("title", "")).strip(),
+                        "behavioralMeaning": str(opt.get("behavioralMeaning", opt.get("description", ""))).strip(),
+                        "tradeoffs": str(opt.get("tradeoffs", "")).strip(),
+                    })
+            norm_concerns.append({
+                "proposalId": str(c.get("proposalId", "")).strip(),
+                "title": str(c.get("title", "")).strip(),
+                "question": str(c.get("question", "")).strip(),
+                "category": str(c.get("category", "")).strip().upper(),
+                "decisionLayer": str(c.get("decisionLayer", "PRODUCT")).strip().upper(),
+                "riskLevel": str(c.get("riskLevel", "MEDIUM")).strip().upper(),
+                "sourceIntentIds": sorted(str(s).strip() for s in c.get("sourceIntentIds", []) if str(s).strip()),
+                "candidateOptions": norm_opts,
+            })
+
+    canonical_obj = {
+        "schemaVersion": str(proposal_data.get("schemaVersion", DISCOVERY_SCHEMA_VERSION)).strip(),
+        "discoveryId": str(proposal_data.get("discoveryId", "")).strip(),
+        "concerns": norm_concerns,
+    }
+    encoded = json.dumps(canonical_obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def compute_review_hash(review_data: Dict[str, Any]) -> str:
+    """Compute deterministic SHA-256 hash over Scope Auditor review evaluations."""
+    if not isinstance(review_data, dict):
+        return hashlib.sha256(b"").hexdigest()
+    evals = review_data.get("evaluations", review_data.get("reviews", []))
+    norm_evals = []
+    if isinstance(evals, list):
+        for ev in evals:
+            if isinstance(ev, dict):
+                norm_evals.append({
+                    "proposalId": str(ev.get("proposalId", "")).strip(),
+                    "verdict": str(ev.get("verdict", "")).strip().upper(),
+                    "rationale": str(ev.get("rationale", "")).strip(),
+                })
+    canonical_obj = {
+        "discoveryId": str(review_data.get("discoveryId", "")).strip(),
+        "proposalHash": str(review_data.get("proposalHash", "")).strip(),
+        "evaluations": norm_evals,
+    }
+    encoded = json.dumps(canonical_obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def ingest_semantic_concern_proposal(
     workspace_dir: Union[str, Path],
     proposal_data: Union[Dict[str, Any], str, Path],
     review_data: Optional[Union[Dict[str, Any], str, Path]] = None,
-    discovery_mode: str = "LIVE_AGENT_DISCOVERY",
+    allow_simulated: bool = False,
+    **kwargs,
 ) -> Tuple[bool, str, List[Dict[str, Any]]]:
     """
     Deterministic kernel API to validate and ingest a semantic concern proposal.
-    The agent CANNOT directly edit concerns.json or decision-graph.json.
-    Validation happens here.
+    Runtime provenance is COMPUTED from context-registry.jsonl evidence, not caller-claimed.
+    Enforces proposal hash binding, Scope Auditor review requirements, and fail-closed sync.
     """
+    if kwargs.get("discovery_mode") == "SIMULATED":
+        allow_simulated = True
+
     ws = Path(workspace_dir).resolve()
 
     # Load proposal if path passed
@@ -347,21 +425,29 @@ def ingest_semantic_concern_proposal(
     if review_data:
         if isinstance(review_data, (str, Path)):
             r_path = Path(review_data).resolve()
-            if r_path.exists():
-                with open(r_path, "r", encoding="utf-8") as f:
-                    r_data = json.load(f)
+            if not r_path.exists():
+                return False, f"Review file not found: {r_path}", []
+            with open(r_path, "r", encoding="utf-8") as f:
+                r_data = json.load(f)
         else:
             r_data = review_data
+
+    # 1. Compute and bind proposal hash
+    prop_hash = compute_proposal_hash(p_data)
+    review_hash: Optional[str] = None
+
+    if r_data:
+        rev_prop_hash = r_data.get("proposalHash")
+        if rev_prop_hash and rev_prop_hash != prop_hash:
+            return False, f"REVIEW_PROPOSAL_HASH_MISMATCH: Proposal has been mutated after Scope Auditor review (current={prop_hash} != review={rev_prop_hash})", []
+        review_hash = compute_review_hash(r_data)
 
     disc_id = p_data.get("discoveryId", "")
     req_path = get_discovery_dir(ws) / f"request-{disc_id}.json"
     req_data = {}
     if req_path.exists():
-        try:
-            with open(req_path, "r", encoding="utf-8") as f:
-                req_data = json.load(f)
-        except Exception:
-            pass
+        with open(req_path, "r", encoding="utf-8") as f:
+            req_data = json.load(f)
 
     # If no stored request file, synthesize from frame
     if not req_data:
@@ -377,12 +463,57 @@ def ingest_semantic_concern_proposal(
     if not is_valid:
         return False, f"Semantic concern proposal validation failed: {'; '.join(errors)}", []
 
-    # Apply Scope Auditor review filtering if available
+    # 2. Risk Evaluation & Scope Auditor Review Policy Enforcement
+    has_high_or_critical = any(str(c.get("riskLevel", "")).upper() in ("HIGH", "CRITICAL") for c in validated)
+    has_medium = any(str(c.get("riskLevel", "")).upper() == "MEDIUM" for c in validated)
+
+    if (has_high_or_critical or has_medium) and not r_data and not allow_simulated:
+        return False, "Scope Auditor review is required for MEDIUM/HIGH/CRITICAL semantic concern proposals.", []
+
+    # 3. Context Isolation & Provenance Evaluation (Computed from context-registry.jsonl)
+    spec_status = "CONTEXT_REGISTRY_NOT_AVAILABLE"
+    scope_status = "CONTEXT_REGISTRY_NOT_AVAILABLE"
+    spec_details: Dict[str, Any] = {}
+    scope_details: Dict[str, Any] = {}
+
+    if context_registry is not None:
+        spec_status, spec_details = context_registry.evaluate_context_isolation(
+            ws, verifier_purpose="SPEC_ARCHITECT", predecessor_purposes=[], allow_simulated=allow_simulated
+        )
+        scope_status, scope_details = context_registry.evaluate_context_isolation(
+            ws, verifier_purpose="SCOPE_AUDITOR", predecessor_purposes=["SPEC_ARCHITECT"], allow_simulated=allow_simulated
+        )
+
+    # Check pairwise inequality
+    if spec_status == "CONTEXT_REUSED" or scope_status == "CONTEXT_REUSED":
+        reused_cid = scope_details.get("reused_conversation_id") or spec_details.get("reused_conversation_id")
+        return False, f"CONTEXT_REUSED: Spec Architect and Scope Auditor conversation IDs collides ({reused_cid})", []
+
+    spec_cid = spec_details.get("verifier_conversation_id")
+    scope_cid = scope_details.get("verifier_conversation_id")
+    if spec_cid and scope_cid and str(spec_cid).strip().lower() == str(scope_cid).strip().lower():
+        return False, f"CONTEXT_REUSED: Spec Architect and Scope Auditor conversation IDs collides ({spec_cid})", []
+
+    is_live_proven = (spec_status == "FRESH_CONTEXT_VERIFIED" and scope_status == "FRESH_CONTEXT_VERIFIED")
+
+    if is_live_proven:
+        discovery_mode = "LIVE_AGENT_DISCOVERY"
+        discovery_status_label = "SEMANTIC_DISCOVERY_VERIFIED"
+    elif allow_simulated or spec_status in ("FRESH_CONTEXT_SIMULATED", "CONTEXT_ISOLATION_NOT_PROVEN"):
+        discovery_mode = "SIMULATED_INTEGRATION"
+        discovery_status_label = "SIMULATED_SEMANTIC_DISCOVERY"
+    else:
+        if has_high_or_critical:
+            return False, f"LIVE_AGENT_DISCOVERY required for HIGH/CRITICAL work, but context proof failed: SpecArchitect={spec_status}, ScopeAuditor={scope_status}", []
+        discovery_mode = "SIMULATED_INTEGRATION"
+        discovery_status_label = "LIVE_AGENT_DISCOVERY_NOT_PROVEN"
+
+    # 4. Apply Scope Auditor review filtering
     rejected_pids = set()
     if r_data:
         evals = r_data.get("evaluations", r_data.get("reviews", []))
         for ev in evals:
-            if isinstance(ev, dict) and ev.get("verdict") == "REJECT":
+            if isinstance(ev, dict) and ev.get("verdict") in ("REJECT", "REJECTED"):
                 rejected_pids.add(ev.get("proposalId"))
 
     # Load existing concerns
@@ -447,7 +578,6 @@ def ingest_semantic_concern_proposal(
             discovery_origin="AGENT_PROPOSAL",
         ) if concern_mod else {}
 
-        # Kernel computes authoritative utility!
         if question_utility and canon_c:
             authoritative_utility = question_utility.calculate_question_utility(canon_c)
             canon_c["questionUtility"] = authoritative_utility
@@ -468,13 +598,15 @@ def ingest_semantic_concern_proposal(
             sdesc = s.get("description", stitle) if isinstance(s, dict) else stitle
             requirement_generator.record_suggestion_sandbox(ws, title=stitle, description=sdesc)
 
-    # Save discovery status record with honest mode
+    # Save discovery status record with honest computed mode
     prop_list = p_data.get("concerns", [p_data] if "title" in p_data else [])
     disc_status = {
         "discoveryId": disc_id,
         "discoveryMode": discovery_mode,
-        "status": "SEMANTIC_DISCOVERY_COMPLETED" if discovery_mode in ("LIVE_AGENT_DISCOVERY", "INTEGRATION_SIMULATED") else "HEURISTIC_DISCOVERY_ONLY",
-        "discoveryOrigin": "AGENT_PROPOSAL" if (len(ingested_concerns) > 0 or discovery_mode in ("LIVE_AGENT_DISCOVERY", "AGENT_PROPOSAL", "INTEGRATION_SIMULATED")) else "HEURISTIC_SEED",
+        "status": discovery_status_label,
+        "discoveryOrigin": "AGENT_PROPOSAL" if len(ingested_concerns) > 0 else "HEURISTIC_SEED",
+        "proposalHash": prop_hash,
+        "reviewHash": review_hash,
         "proposalCount": len(prop_list),
         "acceptedCount": len(ingested_concerns),
         "ingestedConcernsCount": len(ingested_concerns),
@@ -494,6 +626,32 @@ def ingest_semantic_concern_proposal(
         json.dump(disc_status, f, indent=2)
     os.replace(temp_canon, canon_status)
 
+    # Store discovery runtime evidence
+    def _cid_hash(cid: Optional[str]) -> Optional[str]:
+        return hashlib.sha256(str(cid).strip().encode("utf-8")).hexdigest() if cid else None
+
+    evidence = {
+        "discoveryId": disc_id,
+        "specArchitectConversationIdHash": _cid_hash(spec_details.get("verifier_conversation_id")),
+        "specArchitectContextProofHash": spec_details.get("context_proof_hash"),
+        "scopeAuditorConversationIdHash": _cid_hash(scope_details.get("verifier_conversation_id")),
+        "scopeAuditorContextProofHash": scope_details.get("context_proof_hash"),
+        "proposalHash": prop_hash,
+        "reviewHash": review_hash,
+        "runtimeOriginStatuses": {
+            "specArchitect": spec_details.get("runtime_origin_status"),
+            "scopeAuditor": scope_details.get("runtime_origin_status"),
+        },
+        "discoveryMode": discovery_mode,
+        "status": discovery_status_label,
+        "createdAt": utc_now_iso(),
+    }
+    ev_path = get_discovery_dir(ws) / "evidence.json"
+    temp_ev = ev_path.with_suffix(".json.tmp")
+    with open(temp_ev, "w", encoding="utf-8") as f:
+        json.dump(evidence, f, indent=2)
+    os.replace(temp_ev, ev_path)
+
     # Record event in ledger
     if decision_events:
         decision_events.record_decision_event(
@@ -502,6 +660,7 @@ def ingest_semantic_concern_proposal(
             payload={
                 "discoveryId": disc_id,
                 "discoveryMode": discovery_mode,
+                "proposalHash": prop_hash,
                 "ingestedCount": len(ingested_concerns),
                 "concernIds": [c["id"] for c in ingested_concerns],
             },
@@ -540,8 +699,8 @@ def load_discovery_status(workspace_dir: Union[str, Path]) -> Dict[str, Any]:
         s_path = get_discovery_dir(ws) / "discovery-status.json"
     if not s_path.exists():
         return {
-            "discoveryMode": "SEMANTIC_DISCOVERY_NOT_EXECUTED",
-            "status": "NOT_STARTED",
+            "discoveryMode": "NONE",
+            "status": "HEURISTIC_DISCOVERY_ONLY",
             "discoveryOrigin": "HEURISTIC_SEED",
             "proposalCount": 0,
             "acceptedCount": 0,

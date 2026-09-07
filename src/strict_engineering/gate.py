@@ -102,16 +102,32 @@ SHELL_WRITE_PATTERNS = [
 def normalize_rel_path(path_str: str, workspace_root: Path) -> str:
     """Normalize path relative to workspace root with forward slashes."""
     try:
-        p = Path(path_str)
-        if p.is_absolute():
-            rel = str(p.relative_to(workspace_root)).replace("\\", "/")
-        else:
-            rel = str(p).replace("\\", "/")
+        p = Path(path_str).resolve()
+        ws = Path(workspace_root).resolve()
+        rel = str(p.relative_to(ws)).replace("\\", "/")
         if rel.startswith("./"):
             rel = rel[2:]
         return rel
     except Exception:
-        return str(path_str).replace("\\", "/")
+        pass
+
+    try:
+        norm_p = os.path.normcase(os.path.abspath(path_str)).replace("\\", "/")
+        norm_ws = os.path.normcase(os.path.abspath(str(workspace_root))).replace("\\", "/")
+        if not norm_ws.endswith("/"):
+            norm_ws += "/"
+        if norm_p.startswith(norm_ws):
+            rel = norm_p[len(norm_ws):]
+            if rel.startswith("./"):
+                rel = rel[2:]
+            return rel
+    except Exception:
+        pass
+
+    rel = str(path_str).replace("\\", "/")
+    if rel.startswith("./"):
+        rel = rel[2:]
+    return rel
 
 
 def resolve_workspace(payload: Any) -> Optional[Path]:
@@ -142,11 +158,17 @@ def is_write_safe(
         rel_path = normalize_rel_path(str(target_path), ws)
     else:
         rel_path = str(target_path).replace("\\", "/")
+        if rel_path.startswith("./"):
+            rel_path = rel_path[2:]
 
+    norm_rel = rel_path.replace("\\", "/")
     if (
-        rel_path in PROTECTED_ARTIFACTS
-        or rel_path.startswith(".agent-harness/discovery/")
-        or rel_path.startswith(".agent-harness/acceptance/")
+        norm_rel in PROTECTED_ARTIFACTS
+        or norm_rel.startswith(".agent-harness/discovery/")
+        or norm_rel.startswith(".agent-harness/acceptance/")
+        or any(norm_rel.endswith("/" + pa) for pa in PROTECTED_ARTIFACTS)
+        or "/.agent-harness/discovery/" in norm_rel
+        or "/.agent-harness/acceptance/" in norm_rel
     ):
         return False, f"Direct write denied: '{rel_path}' is a protected harness artifact."
     return True, "Allowed"
@@ -194,8 +216,16 @@ def evaluate_pre_tool_use(payload: Dict[str, Any]) -> Dict[str, Any]:
         rel_path = normalize_rel_path(target_path_str, workspace)
 
         # 1a. Protected Harness Artifacts are IMMUTABLE via LLM edit tools
-        if rel_path in PROTECTED_ARTIFACTS:
-            if rel_path == "docs/ACCEPTANCE_TESTS.md":
+        is_protected = (
+            rel_path in PROTECTED_ARTIFACTS
+            or rel_path.startswith(".agent-harness/discovery/")
+            or rel_path.startswith(".agent-harness/acceptance/")
+            or any(rel_path.endswith("/" + pa) for pa in PROTECTED_ARTIFACTS)
+            or "/.agent-harness/discovery/" in rel_path
+            or "/.agent-harness/acceptance/" in rel_path
+        )
+        if is_protected:
+            if rel_path == "docs/ACCEPTANCE_TESTS.md" or rel_path.endswith("/docs/ACCEPTANCE_TESTS.md"):
                 return {
                     "decision": "deny",
                     "reason": f"Security Gate Deny: Tool '{tool_name}' blocked: Acceptance contracts in '{rel_path}' are immutable once locked. Must use authorized kernel lifecycle operations.",
@@ -207,7 +237,12 @@ def evaluate_pre_tool_use(payload: Dict[str, Any]) -> Dict[str, Any]:
 
         # 1b. Specification Phase Protection: Builder cannot modify source files during SPECIFICATION
         if phase == "SPECIFICATION":
-            is_allowed_spec_file = rel_path.startswith(".agent-harness/") or rel_path.startswith("docs/")
+            is_allowed_spec_file = (
+                rel_path.startswith(".agent-harness/")
+                or rel_path.startswith("docs/")
+                or "/.agent-harness/" in rel_path
+                or "/docs/" in rel_path
+            )
             if not is_allowed_spec_file:
                 return {
                     "decision": "deny",

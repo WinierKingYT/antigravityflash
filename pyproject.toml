@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "antigravity-strict-engineering"
-version = "1.0.2"
+version = "1.1.0"
 description = "Deterministic, Risk-Adaptive and Adversarial Reliability Kernel for Google Antigravity"
 readme = "README.md"
 authors = [{ name = "Strict Engineering Contributors" }]
@@ -20,5 +20,9 @@ classifiers = [
     "Topic :: Software Development :: Testing",
 ]
 
+[project.scripts]
+strict-engineering = "strict_engineering.cli:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
+

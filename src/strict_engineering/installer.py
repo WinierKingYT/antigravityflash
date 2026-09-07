@@ -130,6 +130,137 @@ def merge_hooks_json(
         return False, f"Failed atomic write to hooks.json: {str(e)}", backup_path
 
 
+def disable_hooks(
+    hooks_file: Path,
+    backup_dir: Optional[Path] = None,
+) -> Tuple[bool, str, Optional[Path]]:
+    """
+    Atomically and idempotently disable strict-engineering hooks in hooks.json
+    while preserving all other hooks and settings.
+    """
+    hooks_path = Path(hooks_file).resolve()
+    if not hooks_path.exists():
+        return True, "hooks.json does not exist (already disabled)", None
+
+    try:
+        with open(hooks_path, "r", encoding="utf-8-sig") as f:
+            content = f.read().strip()
+            data = json.loads(content) if content else {}
+        if not isinstance(data, dict):
+            return False, "hooks.json root is not a JSON object", None
+    except Exception as e:
+        return False, f"Failed to parse hooks.json: {e}", None
+
+    if "strict-engineering" not in data:
+        if "_disabled_strict-engineering" in data:
+            return True, "Strict Engineering hooks are already disabled", None
+        return True, "Strict Engineering hooks are not configured (disabled)", None
+
+    backup_path = create_backup(hooks_path, backup_dir)
+    data["_disabled_strict-engineering"] = data.pop("strict-engineering")
+
+    temp_file = hooks_path.parent / f"{hooks_path.name}.tmp"
+    try:
+        with open(temp_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        os.replace(temp_file, hooks_path)
+        return True, "Strict Engineering hooks successfully disabled in hooks.json", backup_path
+    except Exception as e:
+        if temp_file.exists():
+            try:
+                temp_file.unlink()
+            except Exception:
+                pass
+        if backup_path and backup_path.exists():
+            shutil.copy2(backup_path, hooks_path)
+        return False, f"Failed to disable hooks: {e}", backup_path
+
+
+def enable_hooks(
+    hooks_file: Path,
+    python_exe: Optional[str] = None,
+    hooks_handler_script: Optional[Path] = None,
+    backup_dir: Optional[Path] = None,
+) -> Tuple[bool, str, Optional[Path]]:
+    """
+    Atomically and idempotently re-enable strict-engineering hooks in hooks.json
+    while preserving all other hooks and settings.
+    """
+    hooks_path = Path(hooks_file).resolve()
+    if not hooks_path.exists():
+        if python_exe and hooks_handler_script:
+            return merge_hooks_json(hooks_path, python_exe, Path(hooks_handler_script), backup_dir)
+        return False, "hooks.json does not exist and no hook handler provided", None
+
+    try:
+        with open(hooks_path, "r", encoding="utf-8-sig") as f:
+            content = f.read().strip()
+            data = json.loads(content) if content else {}
+        if not isinstance(data, dict):
+            return False, "hooks.json root is not a JSON object", None
+    except Exception as e:
+        return False, f"Failed to parse hooks.json: {e}", None
+
+    if "strict-engineering" in data:
+        return True, "Strict Engineering hooks are already enabled", None
+
+    if "_disabled_strict-engineering" in data:
+        backup_path = create_backup(hooks_path, backup_dir)
+        data["strict-engineering"] = data.pop("_disabled_strict-engineering")
+        temp_file = hooks_path.parent / f"{hooks_path.name}.tmp"
+        try:
+            with open(temp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(temp_file, hooks_path)
+            return True, "Strict Engineering hooks successfully enabled in hooks.json", backup_path
+        except Exception as e:
+            if temp_file.exists():
+                try:
+                    temp_file.unlink()
+                except Exception:
+                    pass
+            if backup_path and backup_path.exists():
+                shutil.copy2(backup_path, hooks_path)
+            return False, f"Failed to enable hooks: {e}", backup_path
+
+    # Neither exists: if handler script given, merge fresh
+    if python_exe and hooks_handler_script:
+        return merge_hooks_json(hooks_path, python_exe, Path(hooks_handler_script), backup_dir)
+
+    return False, "No strict-engineering hooks found to enable. Run 'strict-engineering install'.", None
+
+
+def get_hooks_status(hooks_file: Path) -> Tuple[str, str]:
+    """
+    Check hooks.json status: returns ('ENABLED', detail), ('DISABLED', detail), or ('NOT_INSTALLED', detail).
+    """
+    hooks_path = Path(hooks_file).resolve()
+    if not hooks_path.exists():
+        return "NOT_INSTALLED", "hooks.json not found"
+
+    try:
+        with open(hooks_path, "r", encoding="utf-8-sig") as f:
+            content = f.read().strip()
+            data = json.loads(content) if content else {}
+        if not isinstance(data, dict):
+            return "ERROR", "hooks.json root is not a JSON object"
+    except Exception as e:
+        return "ERROR", f"Failed to parse hooks.json: {e}"
+
+    if "strict-engineering" in data:
+        hooks_map = data["strict-engineering"]
+        has_pre_tool = bool(hooks_map.get("PreToolUse"))
+        has_pre_invoc = bool(hooks_map.get("PreInvocation"))
+        has_stop = bool(hooks_map.get("Stop"))
+        if has_pre_tool and has_pre_invoc and has_stop:
+            return "ENABLED", "All 3 hooks (PreToolUse, PreInvocation, Stop) active"
+        return "ENABLED_PARTIAL", f"Incomplete hooks registered (PreToolUse={has_pre_tool}, PreInvocation={has_pre_invoc}, Stop={has_stop})"
+    elif "_disabled_strict-engineering" in data:
+        return "DISABLED", "Hooks disabled via CLI (_disabled_strict-engineering key present)"
+    else:
+        return "NOT_INSTALLED", "No strict-engineering section in hooks.json"
+
+
 def merge_gemini_md(
     gemini_md_file: Path,
     strict_prompt_content: str,

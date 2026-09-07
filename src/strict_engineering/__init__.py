@@ -2,6 +2,8 @@
 Strict Engineering Kernel V4 Package
 """
 
+__version__ = "1.1.0"
+
 from . import fingerprint
 from . import baseline
 from . import kernel
@@ -19,8 +21,8 @@ from . import decision_coverage
 from . import requirement_generator
 from . import decision_engine
 from . import runtime_safety
+from . import cli
 
-__version__ = "1.0.2"
 
 
 

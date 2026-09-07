@@ -35,6 +35,7 @@ class RuntimeStatus:
     PAUSED_EXTERNAL_ERROR = "PAUSED_EXTERNAL_ERROR"
     PAUSED_CIRCUIT_BREAKER = "PAUSED_CIRCUIT_BREAKER"
     PAUSED_USER_CANCEL = "PAUSED_USER_CANCEL"
+    PAUSED_USER_REQUEST = "PAUSED_USER_REQUEST"
     PAUSED_MAX_STEPS = "PAUSED_MAX_STEPS"
     PAUSED_HOOK_ERROR = "PAUSED_HOOK_ERROR"
     PAUSED_UNKNOWN = "PAUSED_UNKNOWN"
@@ -617,3 +618,64 @@ def resume_harness(workspace_dir: Union[str, Path]) -> Tuple[bool, str, Dict[str
 
     msg = f"Strict Engineering Harness successfully resumed in phase '{current_phase}' (prior status: '{prev_status}')"
     return True, msg, state
+
+
+def pause_harness(
+    workspace_dir: Union[str, Path],
+    reason: str = "Paused via CLI",
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Deterministic pause operation for an active Strict Engineering project.
+    Invariants:
+    - Never unlocks acceptance
+    - Never alters requirements
+    - Never erases evidence
+    - Never fabricates completion
+    - Updates runtimeStatus to PAUSED_USER_REQUEST
+    - Records PAUSE_EXECUTED in runtime-events.jsonl
+    """
+    ws = Path(workspace_dir).resolve()
+    harness_dir = ws / ".agent-harness"
+    state_file = harness_dir / "state.json"
+
+    if not state_file.exists():
+        return False, "Cannot pause: .agent-harness/state.json not found", {}
+
+    try:
+        with open(state_file, "r", encoding="utf-8") as f:
+            state = json.load(f)
+    except Exception as e:
+        return False, f"Cannot pause: failed to read state.json: {e}", {}
+
+    current_phase = state.get("phase", "IMPLEMENTATION")
+    if current_phase == "COMPLETE":
+        return False, "Cannot pause: project is already COMPLETE", state
+
+    prev_status = state.get("runtimeStatus", RuntimeStatus.RUNNING)
+    new_status = RuntimeStatus.PAUSED_USER_REQUEST
+
+    state["runtimeStatus"] = new_status
+    state["pauseReason"] = reason
+    state["pausedAt"] = utc_now_iso()
+    state["updatedAt"] = utc_now_iso()
+
+    temp_file = state_file.with_suffix(".tmp")
+    with open(temp_file, "w", encoding="utf-8") as f:
+        json.dump(state, f, indent=2)
+    os.replace(temp_file, state_file)
+
+    # Record runtime event
+    record_runtime_event(
+        workspace_dir=ws,
+        event_type="PAUSE_EXECUTED",
+        termination_class="USER_REQUESTED",
+        raw_reason=reason,
+        phase=current_phase,
+        runtime_status=new_status,
+        decision="allow",
+        state_fingerprint=compute_state_progress_fingerprint(ws),
+    )
+
+    msg = f"Strict Engineering Harness paused in phase '{current_phase}' (prior status: '{prev_status}', reason: '{reason}')"
+    return True, msg, state
+

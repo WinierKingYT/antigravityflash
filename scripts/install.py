@@ -19,7 +19,7 @@ def main():
     python_exe = sys.executable
 
     print("==========================================================")
-    print(" Installing Antigravity Strict Engineering Kernel V1.0.2")
+    print(" Installing Antigravity Strict Engineering Kernel V1.1.0")
     print("==========================================================")
     print(f"Target Gemini Directory: {gemini_dir}")
     print(f"Using Python Executable: {python_exe}")
@@ -66,7 +66,7 @@ def main():
             print(f"[ERROR] Failed installing agents: {', '.join(errs)}")
             sys.exit(1)
 
-    print("\n[SUCCESS] Antigravity Strict Engineering Kernel V1.0.2 successfully installed!")
+    print("\n[SUCCESS] Antigravity Strict Engineering Kernel V1.1.0 successfully installed!")
 
 
 if __name__ == "__main__":

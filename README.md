@@ -1,10 +1,10 @@
-# Antigravity Strict Engineering Kernel (V1.0.2)
+# Antigravity Strict Engineering Kernel (V1.1.0)
 
 A deterministic, risk-adaptive, reality-hardened, and adversarial reliability kernel for Google Antigravity on Windows.
 
 [![CI](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml/badge.svg)](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-1.0.2-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-482%20passed-brightgreen.svg)](run_tests.py)
+[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-502%20passed-brightgreen.svg)](run_tests.py)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ---
@@ -130,11 +130,12 @@ antigravity-strict-engineering-kernel/
 │   ├── spec-architect/agent.md         # Atomic specification architect
 │   └── test-oracle/agent.md            # Acceptance criteria & contract locking
 ├── src/strict_engineering/             # Canonical Kernel Source Modules
-│   ├── __init__.py                    # Version 1.0.2
+│   ├── __init__.py                    # Version 1.1.0
 │   ├── acceptance_protocol.py         # Test Oracle Given-When-Then acceptance locking
 │   ├── adversarial_verification.py    # Property, fuzz, mutation & fault injection
 │   ├── baseline.py                    # Workspace health baseline & regression delta
 │   ├── blind_verifier.py              # Single-model blind verification engine
+│   ├── cli.py                         # Unified strict-engineering CLI & UX entrypoint
 │   ├── concern.py                     # Schema 7.2 Semantic concern model & risk scoring
 │   ├── consistency_reviewer.py        # Global decision consistency auditor
 │   ├── context_registry.py            # Step 6S.1 Context isolation proof registry
@@ -167,7 +168,7 @@ antigravity-strict-engineering-kernel/
 │   ├── sandbox.py                     # Git worktree sandbox manager & promotion
 │   ├── stopping_engine.py             # Stopping conditions & gate synchronization
 │   └── verification_policy.py         # Dynamic policy compiler
-├── tests/                             # Comprehensive Test Suites (22 Suites, 482 Tests)
+├── tests/                             # Comprehensive Test Suites
 ├── scripts/
 │   ├── install.py                     # Python-native atomic installer
 │   ├── install.ps1                    # PowerShell atomic installer
@@ -176,37 +177,59 @@ antigravity-strict-engineering-kernel/
 ├── .github/workflows/ci.yml           # GitHub Actions CI workflow
 ├── GEMINI.md                          # Antigravity strict engineering rules
 ├── hooks.json                         # Antigravity lifecycle hooks configuration
-├── pyproject.toml                     # Package specification (v1.0.2)
+├── pyproject.toml                     # Package specification (v1.1.0)
 └── run_tests.py                       # Top-level test runner
 ```
 
 ---
 
-## ⚡ Installation
+## ⚡ Installation & Quick Start
 
-### Option 1: Python-Native Atomic Installer (Cross-Platform)
-
-```bash
-python scripts/install.py
-```
-
-### Option 2: PowerShell Atomic Installer (Windows)
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\install.ps1
-```
-
-### Option 3: Standard Package Install
+### 1. Install Package & Configure Hooks
 
 ```bash
 pip install .
+strict-engineering install
+```
+
+### 2. Initialize a Project
+
+```bash
+cd /path/to/your/project
+strict-engineering init --intent "Build a fast, deterministic CLI tool"
+```
+
+### 3. Inspect Lifecycle & Health
+
+```bash
+# Check project phase, requirements, blockers & readiness
+strict-engineering status
+
+# Run comprehensive environment & harness diagnostics
+strict-engineering doctor
+```
+
+### 4. Operational Controls
+
+```bash
+# Pause active execution cleanly without losing state
+strict-engineering pause
+
+# Resume paused execution using deterministic V1.0.2 semantics
+strict-engineering resume
+
+# Temporarily disable hooks (reversible & non-destructive)
+strict-engineering disable
+
+# Re-enable hooks
+strict-engineering enable
 ```
 
 ---
 
 ## 🧪 Running Tests
 
-To run the complete suite of 482 tests across all 22 test modules:
+To run the complete suite of 502 tests across all 23 test modules:
 
 ```bash
 python run_tests.py
@@ -222,8 +245,8 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ## 📊 Verification Metrics
 
-- **Total Test Cases:** 482
-- **Total Test Suites:** 22
+- **Total Test Cases:** 502
+- **Total Test Suites:** 23
 - **Pass Rate:** 100% (Zero Failures, Zero Errors)
 - **Zero External Dependencies:** Built entirely with Python standard library for maximum portability and zero supply-chain risk.
 

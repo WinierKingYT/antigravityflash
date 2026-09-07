@@ -943,3 +943,19 @@ def resume_execution(workspace_dir: Union[str, Path]) -> Tuple[bool, str, Dict[s
     except (ImportError, ValueError):
         import runtime_safety
     return runtime_safety.resume_harness(workspace_dir)
+
+
+def pause_execution(
+    workspace_dir: Union[str, Path],
+    reason: str = "Paused via CLI",
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Deterministic pause of an active Strict Engineering project.
+    Delegates to runtime_safety.pause_harness.
+    """
+    try:
+        from . import runtime_safety
+    except (ImportError, ValueError):
+        import runtime_safety
+    return runtime_safety.pause_harness(workspace_dir, reason=reason)
+

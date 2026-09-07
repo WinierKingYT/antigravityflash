@@ -54,7 +54,7 @@ def merge_hooks_json(
 
     if hooks_path.exists():
         try:
-            with open(hooks_path, "r", encoding="utf-8") as f:
+            with open(hooks_path, "r", encoding="utf-8-sig") as f:
                 content = f.read().strip()
                 if content:
                     existing_data = json.loads(content)

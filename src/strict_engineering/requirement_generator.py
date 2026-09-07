@@ -111,12 +111,39 @@ def record_suggestion_sandbox(
     return sug
 
 
+def compute_requirement_contract_fingerprint(req: Dict[str, Any]) -> str:
+    """
+    Compute a deterministic SHA-256 hash over the requirement's semantic fields:
+    title, description, category, acceptanceCriteria (sorted/normalized), verificationContract.
+    """
+    title = str(req.get("title", "")).strip()
+    desc = str(req.get("description", "")).strip()
+    cat = str(req.get("category", "")).strip().upper()
+    crit_list = req.get("acceptanceCriteria", [])
+    if isinstance(crit_list, list):
+        norm_crits = sorted(str(c).strip() for c in crit_list if str(c).strip())
+    else:
+        norm_crits = [str(crit_list).strip()]
+    vcontract = str(req.get("verificationContract", "")).strip()
+
+    canonical_obj = {
+        "title": title,
+        "description": desc,
+        "category": cat,
+        "acceptanceCriteria": norm_crits,
+        "verificationContract": vcontract,
+    }
+    encoded = json.dumps(canonical_obj, sort_keys=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def validate_requirement_quality(req: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """
     Validate requirement quality against strict standards:
     - Non-empty title (len >= 5), not purely placeholder/tautology ('Implement DEC-xxx')
     - Non-empty description (len >= 10), not purely generic placeholder
     - Non-empty acceptance criteria, zero tautological criteria ('Implementation satisfies X', 'Selected option ... is verified')
+    - Zero generic placeholders in acceptance criteria ('expected behavior', 'behaves according to', 'works correctly', 'appropriate error', 'as expected')
     - Returns (is_valid, errors)
     """
     errors: List[str] = []
@@ -133,6 +160,11 @@ def validate_requirement_quality(req: Dict[str, Any]) -> Tuple[bool, List[str]]:
     if len(desc) < 10:
         errors.append("Requirement description is too short (must be >= 10 chars).")
 
+    placeholder_pattern = re.compile(
+        r"\b(expected\s+behavior|behaves\s+according\s+to|implementation\s+satisfies|works\s+correctly|appropriate\s+error|as\s+expected)\b",
+        re.IGNORECASE,
+    )
+
     criteria = req.get("acceptanceCriteria")
     if not criteria or not isinstance(criteria, list):
         errors.append("Requirement must have at least one acceptance criterion.")
@@ -142,8 +174,8 @@ def validate_requirement_quality(req: Dict[str, Any]) -> Tuple[bool, List[str]]:
             if not crit_str:
                 errors.append(f"Acceptance criterion at index {idx} is empty.")
                 continue
-            if re.match(r"^implementation\s+satisfies\b", crit_str, re.IGNORECASE):
-                errors.append(f"Acceptance criterion at index {idx} is tautological: '{crit_str}'.")
+            if placeholder_pattern.search(crit_str):
+                errors.append(f"Acceptance criterion at index {idx} contains generic placeholder: '{crit_str}'.")
             if re.match(r"^selected\s+option\s+.*is\s+verified", crit_str, re.IGNORECASE):
                 errors.append(f"Acceptance criterion at index {idx} is tautological: '{crit_str}'.")
 
@@ -158,14 +190,14 @@ def generate_behavioral_acceptance_criteria(
 ) -> List[str]:
     """
     Generate verifiable, observable Given-When-Then behavioral acceptance criteria.
-    Avoids tautologies like 'Implementation satisfies X'.
+    Avoids placeholders and tautologies like 'expected behavior' or 'behaves according to'.
     """
     clean_title = title.strip()
     clean_opt = chosen_option.strip() if chosen_option else clean_title
 
     criteria = [
-        f"Given a valid runtime environment, When the component executes '{clean_title}', Then the system behaves according to '{clean_opt}' and completes successfully.",
-        f"Given abnormal boundary inputs or state faults for '{clean_title}', When invoked, Then the system safely detects the error and rejects with structured diagnostics.",
+        f"Given a valid operational runtime environment, When executing operations under '{clean_title}', Then the system applies the configured '{clean_opt}' specification and produces deterministic outputs.",
+        f"Given abnormal or malformed boundary input for '{clean_title}', When invoked, Then the system safely rejects the operation and emits structured diagnostic error details.",
     ]
     return criteria
 
@@ -239,45 +271,78 @@ def compile_requirements_from_intents(
     for it in intents:
         if not isinstance(it, dict):
             continue
-        icat = str(it.get("category", "GOAL")).upper()
-        if icat not in ("GOAL", "CONSTRAINT"):
+        icat = str(it.get("category", "")).upper()
+        # Invariant 17: Broad goals are not requirements.
+        # Only compile explicit requirements and constraints.
+        if icat not in ("EXPLICIT_REQUIREMENT", "EXPLICIT_CONSTRAINT", "CONSTRAINT"):
             continue
         iid = str(it.get("id", "INTENT-001"))
         itext = str(it.get("text", "")).strip()
         if not itext:
             continue
 
-        if iid in existing_by_intent:
-            ex_r = existing_by_intent[iid]
-            req_id = ex_r.get("id", next_req_id())
-            prev_status = ex_r.get("status", "DISCOVERED")
-        else:
-            req_id = next_req_id()
-            prev_status = "DISCOVERED"
-
-        req_title = f"{'Constraint' if icat == 'CONSTRAINT' else 'Goal'}: {itext[:60]}"
-        req_desc = f"The system shall implement the explicit user {'constraint' if icat == 'CONSTRAINT' else 'goal'}: {itext}."
-        cat = "IMPLEMENTATION_CONSTRAINT" if icat == "CONSTRAINT" else "PRODUCT_GOAL"
+        is_constraint = icat in ("EXPLICIT_CONSTRAINT", "CONSTRAINT")
+        req_title = f"{'Constraint' if is_constraint else 'Requirement'}: {itext[:60]}"
+        req_desc = f"The system shall implement the explicit user {'constraint' if is_constraint else 'requirement'}: {itext}."
+        cat = "IMPLEMENTATION_CONSTRAINT" if is_constraint else "CORE_BEHAVIOR"
         criteria = generate_behavioral_acceptance_criteria(req_title, itext, cat)
 
+        # Dynamic risk evaluation (Fact H & RC-REQ-04)
+        r_level = "MEDIUM"
+        if risk_engine is not None and hasattr(risk_engine, "evaluate_requirement_risk"):
+            try:
+                r_eval = risk_engine.evaluate_requirement_risk({"title": req_title, "description": req_desc})
+                r_level = r_eval.get("riskLevel", r_eval.get("level", "MEDIUM"))
+            except Exception:
+                r_level = "MEDIUM"
+        elif concern_mod is not None and hasattr(concern_mod, "evaluate_concern_risk"):
+            r_level, _ = concern_mod.evaluate_concern_risk(req_title, req_desc, cat)
+
         req_obj = {
-            "id": req_id,
+            "id": "TEMP",
             "title": req_title,
             "description": req_desc,
             "category": cat,
-            "status": prev_status,
+            "status": "DISCOVERED",
             "required": True,
-            "riskLevel": "MEDIUM",
+            "riskLevel": r_level,
             "decisionId": None,
             "concernId": None,
             "intentId": iid,
             "sources": [iid],
             "authority": it.get("provenance", "USER_DIRECT"),
             "acceptanceCriteria": criteria,
-            "verificationContract": f"Verify behavioral compliance of {req_id} according to user statement {iid}",
+            "verificationContract": f"Verify behavioral compliance of requirement according to user statement {iid}",
             "createdAt": utc_now_iso(),
             "updatedAt": utc_now_iso(),
         }
+
+        if iid in existing_by_intent:
+            ex_r = existing_by_intent[iid]
+            req_id = ex_r.get("id", next_req_id())
+            old_status = ex_r.get("status", "DISCOVERED")
+            old_fp = ex_r.get("contractFingerprint")
+            req_obj["id"] = req_id
+            req_obj["verificationContract"] = f"Verify behavioral compliance of {req_id} according to user statement {iid}"
+            req_fp = compute_requirement_contract_fingerprint(req_obj)
+            req_obj["contractFingerprint"] = req_fp
+
+            if old_status in ("PASS", "VERIFIED", "IN_PROGRESS"):
+                if old_fp and old_fp != req_fp:
+                    req_obj["status"] = "STALE"
+                    req_obj["previousStatus"] = old_status
+                    req_obj["stalenessReason"] = "Requirement contract changed; re-verification required"
+                else:
+                    req_obj["status"] = old_status
+            else:
+                req_obj["status"] = old_status
+        else:
+            req_id = next_req_id()
+            req_obj["id"] = req_id
+            req_obj["verificationContract"] = f"Verify behavioral compliance of {req_id} according to user statement {iid}"
+            req_fp = compute_requirement_contract_fingerprint(req_obj)
+            req_obj["contractFingerprint"] = req_fp
+
         val_ok, _ = validate_requirement_quality(req_obj)
         if val_ok:
             compiled_intent_reqs.append(req_obj)
@@ -303,13 +368,17 @@ def compile_requirements_from_intents(
 def compile_requirements_from_decisions(
     workspace_dir: Union[str, Path],
     include_intents: bool = False,
-    force: bool = False,
+    **kwargs,
 ) -> Tuple[bool, str, List[Dict[str, Any]]]:
     """
     Compile atomic requirements from confirmed decisions in .agent-harness/decisions.json.
     Enforces stopping, consistency, and graph validation gates.
     Supports 0:1, 1:1, and 1:N cardinality and non-destructive merge with pre-existing requirements.
+    Dead bypass flags like 'force' are strictly rejected.
     """
+    if "force" in kwargs:
+        raise TypeError("compile_requirements_from_decisions does not accept 'force' parameter (dead bypass flags are rejected).")
+
     ws = Path(workspace_dir).resolve()
 
     # 1. Gate Check: Stopping conditions
@@ -367,7 +436,21 @@ def compile_requirements_from_decisions(
         if not d.get("supersededBy") and str(d.get("status", "ACTIVE")).upper() != "SUPERSEDED"
     ]
 
+    # Zero-decision project support (RC-REQ-07, Fact L)
     if not active_decisions:
+        curr_reqs = []
+        if kernel is not None and hasattr(kernel, "load_requirements"):
+            curr_reqs = kernel.load_requirements(ws)
+        else:
+            r_p = ws / ".agent-harness" / "requirements.json"
+            if r_p.exists():
+                try:
+                    with open(r_p, "r", encoding="utf-8") as f:
+                        curr_reqs = json.load(f)
+                except Exception:
+                    curr_reqs = []
+        if curr_reqs:
+            return True, f"Zero active decisions; preserved {len(curr_reqs)} direct requirements", []
         return False, "No active decisions available to compile requirements from", []
 
     # Load existing requirements to preserve IDs and enable non-destructive merge
@@ -443,6 +526,7 @@ def compile_requirements_from_decisions(
                     "createdAt": utc_now_iso(),
                     "updatedAt": utc_now_iso(),
                 }
+                sub_req_obj["contractFingerprint"] = compute_requirement_contract_fingerprint(sub_req_obj)
                 val_ok, _ = validate_requirement_quality(sub_req_obj)
                 if val_ok:
                     d.setdefault("affectedRequirements", [])
@@ -501,13 +585,16 @@ def compile_requirements_from_decisions(
             "updatedAt": utc_now_iso(),
         }
 
+        req_obj["contractFingerprint"] = compute_requirement_contract_fingerprint(req_obj)
+
         val_ok, val_errs = validate_requirement_quality(req_obj)
         if not val_ok:
             # Fallback ensure non-tautological valid criteria
             req_obj["acceptanceCriteria"] = [
-                f"Given an operational environment, When '{title}' is queried, Then the system provides expected capability matching '{chosen_opt}'.",
+                f"Given a valid operational runtime environment, When executing operations under '{title}', Then the system applies the configured '{chosen_opt}' specification and produces deterministic outputs.",
                 f"Given abnormal state, When '{title}' experiences failure, Then error diagnostics are recorded without data corruption."
             ]
+            req_obj["contractFingerprint"] = compute_requirement_contract_fingerprint(req_obj)
 
         d.setdefault("affectedRequirements", [])
         if req_id not in d["affectedRequirements"]:
@@ -535,7 +622,22 @@ def compile_requirements_from_decisions(
             r["updatedAt"] = utc_now_iso()
 
     for r in compiled_reqs:
-        merged_map[r["id"]] = r
+        rid = r["id"]
+        if rid in merged_map:
+            ex_r = merged_map[rid]
+            old_status = ex_r.get("status", "DISCOVERED")
+            old_fp = ex_r.get("contractFingerprint")
+            new_fp = r.get("contractFingerprint")
+            if old_status in ("PASS", "VERIFIED", "IN_PROGRESS"):
+                if old_fp and old_fp != new_fp:
+                    r["status"] = "STALE"
+                    r["previousStatus"] = old_status
+                    r["stalenessReason"] = "Requirement contract changed; re-verification required"
+                else:
+                    r["status"] = old_status
+            else:
+                r["status"] = old_status
+        merged_map[rid] = r
 
     final_merged_reqs = list(merged_map.values())
 

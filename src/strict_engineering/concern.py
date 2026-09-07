@@ -47,6 +47,19 @@ CONCERN_CATEGORIES = [
     "IMPLEMENTATION_CONSTRAINT",
 ]
 
+CONCERN_DECISION_LAYERS = [
+    "FOUNDATIONAL",
+    "POLICY",
+    "MECHANISM",
+    "SURFACE",
+]
+
+DISCOVERY_ORIGINS = [
+    "HEURISTIC_SEED",
+    "AGENT_PROPOSAL",
+    "HUMAN_INPUT",
+]
+
 CONCERN_STATES = [
     "DISCOVERED",
     "UNRESOLVED",
@@ -242,6 +255,16 @@ def validate_concern(concern_data: Dict[str, Any]) -> Tuple[bool, List[str]]:
     if not isinstance(opts, list):
         errors.append("Field 'candidateOptions' must be a list.")
 
+    # decisionLayer (optional)
+    dlayer = concern_data.get("decisionLayer")
+    if dlayer is not None and dlayer not in CONCERN_DECISION_LAYERS:
+        errors.append(f"Invalid decisionLayer '{dlayer}'. Must be one of {CONCERN_DECISION_LAYERS}.")
+
+    # discoveryOrigin (optional)
+    dorigin = concern_data.get("discoveryOrigin")
+    if dorigin is not None and dorigin not in DISCOVERY_ORIGINS:
+        errors.append(f"Invalid discoveryOrigin '{dorigin}'. Must be one of {DISCOVERY_ORIGINS}.")
+
     return len(errors) == 0, errors
 
 
@@ -271,6 +294,8 @@ def create_concern(
     resolved_at: Optional[str] = None,
     source_intent_ids: Optional[List[str]] = None,
     is_blocking: Optional[bool] = None,
+    decision_layer: Optional[str] = None,
+    discovery_origin: Optional[str] = None,
     **kwargs,
 ) -> Dict[str, Any]:
     """
@@ -285,6 +310,28 @@ def create_concern(
     if not risk_level:
         calc_risk, _ = evaluate_concern_risk(title, description, clean_cat)
         risk_level = calc_risk
+
+    # Resolve decisionLayer
+    raw_layer = kwargs.get("decisionLayer", decision_layer)
+    if raw_layer:
+        d_layer = str(raw_layer).upper().strip()
+        if d_layer not in CONCERN_DECISION_LAYERS:
+            d_layer = "MECHANISM"
+    else:
+        if clean_cat in ("TECHNICAL_ARCHITECTURE", "PERSISTENCE", "PLATFORM", "PRODUCT_GOAL", "SCOPE"):
+            d_layer = "FOUNDATIONAL"
+        elif clean_cat in ("AUTHORIZATION", "SECURITY", "PRIVACY", "IRREVERSIBILITY", "FINANCIAL", "NON_GOAL", "OWNERSHIP"):
+            d_layer = "POLICY"
+        elif clean_cat in ("PRIMARY_USER", "INTEGRATION"):
+            d_layer = "SURFACE"
+        else:
+            d_layer = "MECHANISM"
+
+    # Resolve discoveryOrigin
+    raw_origin = kwargs.get("discoveryOrigin", discovery_origin if discovery_origin else "HEURISTIC_SEED")
+    d_origin = str(raw_origin).upper().strip()
+    if d_origin not in DISCOVERY_ORIGINS:
+        d_origin = "HEURISTIC_SEED"
 
     # Resolve camelCase overrides from kwargs
     downstream = kwargs.get("downstreamImpact", downstream_impact if downstream_impact is not None else 0.5)
@@ -306,6 +353,8 @@ def create_concern(
         "description": str(description).strip(),
         "category": clean_cat,
         "status": clean_status,
+        "decisionLayer": d_layer,
+        "discoveryOrigin": d_origin,
         "source": {
             "type": str(source.get("type", "ORIGINAL_INTENT")),
             "reference": str(source.get("reference", "")),
@@ -536,8 +585,95 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
     full_corpus = " ".join(corpus_items).lower()
 
     # Dimension 1: State Retention & Durability Architecture (PERSISTENCE)
-    if re.search(r'\b(save|persist|persistence|storage|database|db|store|records?|data|durability|disk|file\s+system)\b', full_corpus, re.IGNORECASE):
-        matched_iids = find_intent_ids_for_text("save persist storage database store records durability")
+    # Require explicit persistence/storage terms or domains inherently requiring state retention (games, editors, documents)
+    has_persistence = bool(re.search(r'\b(save|persist|persistence|storage|database|db|store|records?|durability|disk|file\s+system|inventory|editor|document|rpg|game)\b', full_corpus, re.IGNORECASE))
+    if has_persistence:
+        matched_iids = find_intent_ids_for_text("save persist storage database store records durability inventory editor document game")
+        is_game = bool(re.search(r'\b(game|player|quest|inventory|rpg|level|health|score)\b', full_corpus, re.IGNORECASE))
+        is_editor = bool(re.search(r'\b(editor|document|canvas|notes?|markdown|buffer)\b', full_corpus, re.IGNORECASE))
+
+        if is_game:
+            dim1_options = [
+                {
+                    "id": "OPT-1",
+                    "title": "Slot-Based Checkpoint Persistence",
+                    "description": "Periodically persist game state snapshots into isolated save slot archives.",
+                    "tradeoffs": "Reliable point-in-time recovery; manual or checkpoint triggered.",
+                    "consequences": ["Atomic slot saves", "Checkpoint rollback support"],
+                    "isRecommended": True,
+                },
+                {
+                    "id": "OPT-2",
+                    "title": "Continuous State Autosave",
+                    "description": "Asynchronously persist incremental state deltas on every game event.",
+                    "tradeoffs": "Zero progress loss; higher write frequency.",
+                    "consequences": ["Continuous progress protection", "Frequent background disk writes"],
+                    "isRecommended": False,
+                },
+                {
+                    "id": "OPT-3",
+                    "title": "Session-Bounded Ephemeral State",
+                    "description": "Retain state strictly in memory during gameplay with explicit manual export upon exit.",
+                    "tradeoffs": "Maximum execution speed; state lost on abnormal termination.",
+                    "consequences": ["Zero disk I/O during play", "Manual save export required"],
+                    "isRecommended": False,
+                },
+            ]
+        elif is_editor:
+            dim1_options = [
+                {
+                    "id": "OPT-1",
+                    "title": "Continuous Auto-Save with Local Revision Journal",
+                    "description": "Automatically stream document changes to a local recovery journal.",
+                    "tradeoffs": "Continuous protection against crashes; requires journal compaction.",
+                    "consequences": ["Zero data loss on crash", "Background write journal overhead"],
+                    "isRecommended": True,
+                },
+                {
+                    "id": "OPT-2",
+                    "title": "Explicit User-Initiated Save with Dirty State Tracking",
+                    "description": "Maintain in-memory buffer with dirty state tracking until user issues explicit save command.",
+                    "tradeoffs": "Predictable disk writes; unpersisted edits lost if terminated unexpectedly.",
+                    "consequences": ["Explicit user control over files", "Dirty state indicator required"],
+                    "isRecommended": False,
+                },
+                {
+                    "id": "OPT-3",
+                    "title": "Append-Only Operational Change Log",
+                    "description": "Persist all edit operations sequentially to an append-only transaction log.",
+                    "tradeoffs": "Full edit history replayability; larger storage footprint.",
+                    "consequences": ["Full audit and replay history", "Storage compaction required"],
+                    "isRecommended": False,
+                },
+            ]
+        else:
+            dim1_options = [
+                {
+                    "id": "OPT-1",
+                    "title": "Embedded Transactional Datastore",
+                    "description": "Store application records in an embedded ACID-compliant transactional datastore with atomic commit guarantees.",
+                    "tradeoffs": "Robust ACID transactions and structured querying; embedded engine dependency.",
+                    "consequences": ["Atomic transaction support", "Structured query indexing"],
+                    "isRecommended": True,
+                },
+                {
+                    "id": "OPT-2",
+                    "title": "Flat Structured File Journal",
+                    "description": "Store records as human-readable structured files (JSON/YAML) directly on the local filesystem.",
+                    "tradeoffs": "Direct human readability and zero external dependencies; lacks atomic multi-file transactions.",
+                    "consequences": ["Direct human inspection", "Manual file lock coordination"],
+                    "isRecommended": False,
+                },
+                {
+                    "id": "OPT-3",
+                    "title": "In-Memory State with Periodic Snapshot",
+                    "description": "Maintain state in-process for low latency with periodic asynchronous background snapshots to disk.",
+                    "tradeoffs": "Fast sub-microsecond access; potential loss of recent mutations on unexpected power loss.",
+                    "consequences": ["Maximum in-memory speed", "Snapshot persistence overhead"],
+                    "isRecommended": False,
+                },
+            ]
+
         concerns.append(create_concern(
             id=next_cid(),
             title="State Retention & Durability Architecture",
@@ -551,51 +687,19 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
             downstream_impact=0.9,
             risk_reduction_potential=0.8,
             expected_discrimination=0.9,
-            candidate_options=[
-                {
-                    "id": "OPT-1",
-                    "title": "Embedded Transactional Datastore",
-                    "description": "Store application records in an embedded ACID-compliant transactional datastore with atomic commit guarantees.",
-                    "tradeoffs": "Robust ACID transactions and relational querying; embedded binary engine required.",
-                    "consequences": ["Atomic transaction support", "Structured query indexing"],
-                    "isRecommended": True,
-                },
-                {
-                    "id": "OPT-2",
-                    "title": "Flat Structured File Storage",
-                    "description": "Store records as human-readable structured files (JSON/YAML) directly on the local filesystem.",
-                    "tradeoffs": "Direct human readability and zero external dependencies; lacks atomic multi-file transactions.",
-                    "consequences": ["Direct human inspection", "Manual file lock coordination"],
-                    "isRecommended": False,
-                },
-                {
-                    "id": "OPT-3",
-                    "title": "In-Memory State with Periodic Snapshot",
-                    "description": "Maintain state in-process for low latency with periodic asynchronous background snapshots to disk.",
-                    "tradeoffs": "Fast sub-microsecond access; potential loss of recent mutations on unexpected power loss.",
-                    "consequences": ["Maximum in-memory speed", "Snapshot persistence overhead"],
-                    "isRecommended": False,
-                }
-            ],
+            decision_layer="FOUNDATIONAL",
+            discovery_origin="HEURISTIC_SEED",
+            candidate_options=dim1_options,
         ))
 
-    # Dimension 2: Query Execution & Retrieval Strategy (CORE_BEHAVIOR)
-    if re.search(r'\b(find|search|query|lookup|filter|scan|index|retrieval)\b', full_corpus, re.IGNORECASE):
-        matched_iids = find_intent_ids_for_text("find search query lookup filter retrieval scan")
-        concerns.append(create_concern(
-            id=next_cid(),
-            title="Query Execution & Retrieval Strategy",
-            description="Determine indexing strategy, query parsing semantics, and matching algorithm for retrieving records.",
-            category="CORE_BEHAVIOR",
-            status="ACTIVE",
-            source={"type": "FRAME_GOAL", "reference": "Query Execution & Retrieval"},
-            source_intent_ids=matched_iids,
-            risk_level="HIGH",
-            uncertainty=0.7,
-            downstream_impact=0.8,
-            risk_reduction_potential=0.8,
-            expected_discrimination=0.9,
-            candidate_options=[
+    # Dimension 2: Execution, Query & Processing Engine (CORE_BEHAVIOR)
+    if re.search(r'\b(find|search|query|lookup|filter|scan|index|retrieval|parse|parsing|compiler?|ast|synthesiz\w*|pcm|audio|stream\w*|packet|process\w*)\b', full_corpus, re.IGNORECASE):
+        matched_iids = find_intent_ids_for_text("find search query lookup filter retrieval scan parse compiler stream packet audio process")
+        is_query = bool(re.search(r'\b(find|search|query|lookup|scan|index|retrieval)\b', full_corpus, re.IGNORECASE))
+        if is_query:
+            c_title = "Query Execution & Retrieval Strategy"
+            c_desc = "Determine indexing strategy, query parsing semantics, and matching algorithm for retrieving records."
+            c_options = [
                 {
                     "id": "OPT-1",
                     "title": "Indexed Inverted Search Engine",
@@ -620,11 +724,61 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
                     "consequences": ["Fast exact-key lookup", "No full-text search capability"],
                     "isRecommended": False,
                 }
-            ],
+            ]
+        else:
+            c_title = "Data Processing & Execution Engine Architecture"
+            c_desc = "Determine execution pipeline, buffering strategy, and transformation semantics for streaming/processing input."
+            c_options = [
+                {
+                    "id": "OPT-1",
+                    "title": "Streaming Pipeline with Bounded Buffer",
+                    "description": "Stream items through bounded buffers with backpressure regulation.",
+                    "tradeoffs": "Sub-millisecond processing latency and bounded memory; pipeline coordination.",
+                    "consequences": ["Deterministic bounded memory", "Backpressure handling required"],
+                    "isRecommended": True,
+                },
+                {
+                    "id": "OPT-2",
+                    "title": "Synchronous Batch Processing",
+                    "description": "Accumulate batch blocks in memory and transform synchronously.",
+                    "tradeoffs": "High throughput and simple sequential logic; spikes peak memory usage.",
+                    "consequences": ["Simple sequential transformation", "Higher latency per batch"],
+                    "isRecommended": False,
+                },
+                {
+                    "id": "OPT-3",
+                    "title": "Event-Driven Reactive Loop",
+                    "description": "Asynchronous event-driven dispatch loop handling incoming frame events.",
+                    "tradeoffs": "Non-blocking reactive responsiveness; asynchronous error handling complexity.",
+                    "consequences": ["Non-blocking responsiveness", "Async flow tracing overhead"],
+                    "isRecommended": False,
+                }
+            ]
+
+        concerns.append(create_concern(
+            id=next_cid(),
+            title=c_title,
+            description=c_desc,
+            category="CORE_BEHAVIOR",
+            status="ACTIVE",
+            source={"type": "FRAME_GOAL", "reference": c_title},
+            source_intent_ids=matched_iids,
+            risk_level="HIGH",
+            uncertainty=0.7,
+            downstream_impact=0.8,
+            risk_reduction_potential=0.8,
+            expected_discrimination=0.9,
+            decision_layer="MECHANISM",
+            discovery_origin="HEURISTIC_SEED",
+            candidate_options=c_options,
         ))
 
     # Dimension 3: Access Control & Identity Isolation Policy (AUTHORIZATION)
-    if re.search(r'\b(auth|authentication|login|permission|permissions|role|roles|rbac|user|users|tenant|tenancy|access|session|token|credentials|password)\b', full_corpus, re.IGNORECASE):
+    # Avoid false positives: single-user/local tools without multi-user or auth terms must NOT trigger critical authorization concerns.
+    has_explicit_auth = bool(re.search(r'\b(auth|authentication|login|permission|permissions|role|roles|rbac|tenant|tenancy|credentials?|passwords?|multi[_\s-]?user)\b', full_corpus, re.IGNORECASE))
+    is_explicit_single_user = bool(re.search(r'\b(single[_\s-]?user|one\s+user|local[_\s-]?only|offline|personal|standalone)\b', full_corpus, re.IGNORECASE))
+
+    if has_explicit_auth and not is_explicit_single_user:
         matched_iids = find_intent_ids_for_text("auth login permission role user tenant credentials password")
         concerns.append(create_concern(
             id=next_cid(),
@@ -639,10 +793,12 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
             downstream_impact=0.9,
             risk_reduction_potential=0.9,
             expected_discrimination=0.9,
+            decision_layer="POLICY",
+            discovery_origin="HEURISTIC_SEED",
             candidate_options=[
                 {
                     "id": "OPT-1",
-                    "title": "Role-Based Access Control (RBAC)",
+                    "title": "Hierarchical Role and Permission Boundaries",
                     "description": "Enforce formal role hierarchies and granular permission checks on every operation.",
                     "tradeoffs": "Fine-grained security and compliance; requires role management and permission mappings.",
                     "consequences": ["Granular privilege boundaries", "Role management administration"],
@@ -658,7 +814,7 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
                 },
                 {
                     "id": "OPT-3",
-                    "title": "Token-Based Scoped Capability Authentication",
+                    "title": "Capability-Based Delegated Claims",
                     "description": "Cryptographic bearer tokens with signed capability claims and expiration.",
                     "tradeoffs": "Stateless verification; requires secure token distribution and revocation tracking.",
                     "consequences": ["Stateless verification", "Token lifecycle management"],
@@ -684,6 +840,8 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
             downstream_impact=0.8,
             risk_reduction_potential=0.8,
             expected_discrimination=0.9,
+            decision_layer="SURFACE",
+            discovery_origin="HEURISTIC_SEED",
             candidate_options=[
                 {
                     "id": "OPT-1",
@@ -728,6 +886,8 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
             downstream_impact=0.8,
             risk_reduction_potential=0.8,
             expected_discrimination=0.9,
+            decision_layer="MECHANISM",
+            discovery_origin="HEURISTIC_SEED",
             candidate_options=[
                 {
                     "id": "OPT-1",
@@ -772,6 +932,8 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
             downstream_impact=0.95,
             risk_reduction_potential=0.9,
             expected_discrimination=0.9,
+            decision_layer="MECHANISM",
+            discovery_origin="HEURISTIC_SEED",
             candidate_options=[
                 {
                     "id": "OPT-1",
@@ -819,6 +981,8 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
             uncertainty=0.4,
             downstream_impact=0.7,
             is_blocking=True,
+            decision_layer="POLICY" if cat != "PERSISTENCE" else "FOUNDATIONAL",
+            discovery_origin="HEURISTIC_SEED",
         )
         concerns.append(c)
 
@@ -838,6 +1002,8 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
             risk_level="LOW",
             uncertainty=0.1,
             downstream_impact=0.5,
+            decision_layer="POLICY",
+            discovery_origin="HEURISTIC_SEED",
         )
         concerns.append(c)
 
@@ -855,6 +1021,8 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
             risk_level="MEDIUM",
             uncertainty=0.9,
             downstream_impact=0.8,
+            decision_layer="MECHANISM",
+            discovery_origin="HEURISTIC_SEED",
         )
         concerns.append(c)
 
@@ -871,6 +1039,8 @@ def propose_semantic_concerns_from_frame(frame_data: Dict[str, Any]) -> List[Dic
             risk_level="MEDIUM",
             uncertainty=0.8,
             downstream_impact=0.8,
+            decision_layer="FOUNDATIONAL",
+            discovery_origin="HEURISTIC_SEED",
         )
         concerns.append(c)
 

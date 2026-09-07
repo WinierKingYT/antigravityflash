@@ -79,6 +79,9 @@ PROTECTED_ARTIFACTS = {
     ".agent-harness/decision-status.json",
     ".agent-harness/asked-questions.json",
     ".agent-harness/suggestions.json",
+    ".agent-harness/discovery/request.json",
+    ".agent-harness/discovery/proposals.json",
+    ".agent-harness/discovery/status.json",
 }
 
 # Shell write commands matching PowerShell, cmd, Python inline, and file manipulation tools
@@ -135,7 +138,7 @@ def is_write_safe(
     else:
         rel_path = str(target_path).replace("\\", "/")
 
-    if rel_path in PROTECTED_ARTIFACTS:
+    if rel_path in PROTECTED_ARTIFACTS or rel_path.startswith(".agent-harness/discovery/"):
         return False, f"Direct write denied: '{rel_path}' is a protected harness artifact."
     return True, "Allowed"
 

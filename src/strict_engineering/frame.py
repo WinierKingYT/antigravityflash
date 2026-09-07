@@ -22,6 +22,19 @@ except (ImportError, ValueError):
 
 SCHEMA_VERSION = "7.0"
 
+INTENT_CATEGORIES = [
+    "EXPLICIT_REQUIREMENT",
+    "EXPLICIT_CONSTRAINT",
+    "PRODUCT_GOAL",
+    "PREFERENCE",
+    "NON_GOAL",
+    "CONTEXT_FACT",
+    "OPEN_QUESTION",
+    "AMBIGUOUS_BEHAVIOR",
+    "GOAL",
+    "CONSTRAINT",
+]
+
 VALID_PROVENANCE_TYPES = {
     "EXPLICIT_USER_STATEMENT",
     "AUTHORIZED_DECISION",
@@ -79,6 +92,7 @@ def create_initial_frame(
     source_references: Optional[List[str]] = None,
     success_definition: Optional[List[Union[Dict[str, str], str]]] = None,
     intents: Optional[List[Dict[str, Any]]] = None,
+    explicit_requirements: Optional[List[Union[Dict[str, str], str]]] = None,
 ) -> Dict[str, Any]:
     """
     Construct a canonical Structured Project Frame dict conforming to schemaVersion "7.0".
@@ -103,6 +117,8 @@ def create_initial_frame(
 
     norm_constraints = norm_list(explicit_constraints, "EXPLICIT_USER_STATEMENT")
     norm_nongoals = norm_list(explicit_non_goals, "EXPLICIT_USER_STATEMENT")
+    norm_facts = norm_list(known_facts, "EXPLICIT_USER_STATEMENT")
+    norm_reqs = norm_list(explicit_requirements, "EXPLICIT_USER_STATEMENT")
 
     # Canonical INTENT Model (INTENT-001, INTENT-002, ...)
     canonical_intents: List[Dict[str, Any]] = []
@@ -111,7 +127,8 @@ def create_initial_frame(
             if isinstance(item, dict):
                 iid = str(item.get("id") or f"INTENT-{str(idx).zfill(3)}")
                 itext = str(item.get("text", "")).strip()
-                icat = str(item.get("category", "GOAL")).upper()
+                raw_cat = str(item.get("category", "PRODUCT_GOAL")).upper()
+                icat = raw_cat if raw_cat in INTENT_CATEGORIES else "PRODUCT_GOAL"
                 iprov = str(item.get("provenance", "EXPLICIT_USER_STATEMENT"))
                 shash = item.get("statementHash") or hashlib.sha256(itext.encode("utf-8")).hexdigest()
                 canonical_intents.append({
@@ -123,25 +140,37 @@ def create_initial_frame(
                     "statementHash": shash,
                 })
     else:
-        # Automatically generate canonical intents from goals, constraints, non-goals
+        # Automatically generate canonical intents from goals, requirements, constraints, non-goals, facts
         c_idx = 1
         if cleaned_goal:
             canonical_intents.append({
                 "id": f"INTENT-{str(c_idx).zfill(3)}",
                 "text": cleaned_goal,
-                "category": "GOAL",
+                "category": "PRODUCT_GOAL",
                 "provenance": "EXPLICIT_USER_STATEMENT",
                 "order": c_idx,
                 "statementHash": hashlib.sha256(cleaned_goal.encode("utf-8")).hexdigest(),
             })
             c_idx += 1
+        for r_entry in norm_reqs:
+            r_txt = r_entry.get("text", "").strip()
+            if r_txt:
+                canonical_intents.append({
+                    "id": f"INTENT-{str(c_idx).zfill(3)}",
+                    "text": r_txt,
+                    "category": "EXPLICIT_REQUIREMENT",
+                    "provenance": r_entry.get("provenance", "EXPLICIT_USER_STATEMENT"),
+                    "order": c_idx,
+                    "statementHash": hashlib.sha256(r_txt.encode("utf-8")).hexdigest(),
+                })
+                c_idx += 1
         for c_entry in norm_constraints:
             c_txt = c_entry.get("text", "").strip()
             if c_txt:
                 canonical_intents.append({
                     "id": f"INTENT-{str(c_idx).zfill(3)}",
                     "text": c_txt,
-                    "category": "CONSTRAINT",
+                    "category": "EXPLICIT_CONSTRAINT",
                     "provenance": c_entry.get("provenance", "EXPLICIT_USER_STATEMENT"),
                     "order": c_idx,
                     "statementHash": hashlib.sha256(c_txt.encode("utf-8")).hexdigest(),
@@ -159,6 +188,18 @@ def create_initial_frame(
                     "statementHash": hashlib.sha256(ng_txt.encode("utf-8")).hexdigest(),
                 })
                 c_idx += 1
+        for f_entry in norm_facts:
+            f_txt = f_entry.get("text", "").strip()
+            if f_txt:
+                canonical_intents.append({
+                    "id": f"INTENT-{str(c_idx).zfill(3)}",
+                    "text": f_txt,
+                    "category": "CONTEXT_FACT",
+                    "provenance": f_entry.get("provenance", "EXPLICIT_USER_STATEMENT"),
+                    "order": c_idx,
+                    "statementHash": hashlib.sha256(f_txt.encode("utf-8")).hexdigest(),
+                })
+                c_idx += 1
 
     return {
         "schemaVersion": SCHEMA_VERSION,
@@ -170,9 +211,11 @@ def create_initial_frame(
         "constraints": norm_constraints,
         "explicitNonGoals": norm_nongoals,
         "nonGoals": norm_nongoals,
+        "explicitRequirements": norm_reqs,
+        "requirements": norm_reqs,
         "goals": [cleaned_goal] if cleaned_goal else [],
         "intents": canonical_intents,
-        "knownFacts": norm_list(known_facts, "EXPLICIT_USER_STATEMENT"),
+        "knownFacts": norm_facts,
         "unknowns": norm_list(unknowns, "MODEL_HYPOTHESIS"),
         "assumptions": norm_list(assumptions, "SAFE_INFERENCE"),
         "sourceReferences": [str(s).strip() for s in (source_references or []) if str(s).strip()],
@@ -316,6 +359,7 @@ def extract_frame_from_raw_request(original_intent: str) -> Dict[str, Any]:
         "success": [],
         "non_goals": [],
         "constraints": [],
+        "requirements": [],
         "facts": [],
         "unknowns": [],
         "assumptions": [],
@@ -325,6 +369,7 @@ def extract_frame_from_raw_request(original_intent: str) -> Dict[str, Any]:
 
     non_goal_headers = re.compile(r"^(?:#+|\*+)?\s*(?:explicit\s+)?(?:non[- ]goals?|out of scope|excluded)(?:\s*:)?", re.IGNORECASE)
     constraint_headers = re.compile(r"^(?:#+|\*+)?\s*(?:explicit\s+)?(?:constraints?|limitations?|rules|restrictions)(?:\s*:)?", re.IGNORECASE)
+    requirement_headers = re.compile(r"^(?:#+|\*+)?\s*(?:explicit\s+)?(?:requirements?|features?|functional\s+requirements?)(?:\s*:)?", re.IGNORECASE)
     fact_headers = re.compile(r"^(?:#+|\*+)?\s*(?:known\s+)?(?:facts?|context|environment|current state)(?:\s*:)?", re.IGNORECASE)
     success_headers = re.compile(r"^(?:#+|\*+)?\s*(?:success\s+criteria|acceptance\s+criteria|success\s+definition|deliverables?)(?:\s*:)?", re.IGNORECASE)
     goal_headers = re.compile(r"^(?:#+|\*+)?\s*(?:project\s+)?(?:goals?|objective|purpose|task)(?:\s*:)?", re.IGNORECASE)
@@ -339,7 +384,11 @@ def extract_frame_from_raw_request(original_intent: str) -> Dict[str, Any]:
         re.IGNORECASE,
     )
     constraint_keyword_regex = re.compile(
-        r"\b(?:constraint|constraints|must|shall|strictly|limit|limited to|maximum|minimum|at least|at most|no external|requires?|only use|only support|cannot)\b",
+        r"\b(?:constraint|constraints|must\s+(?:comply|use|be|have|run|support)|shall\s+comply|strictly|limit|limited to|maximum\s+uploaded|minimum|at least|at most|no external|requires?|only use|only support|cannot)\b",
+        re.IGNORECASE,
+    )
+    requirement_keyword_regex = re.compile(
+        r"\b(?:the application must operate|only (?:administrators?|admins?|workspace owners?|owners?)\s+may|maximum uploaded file size is|after a successful save|requests without administrator|system shall|shall implement|users can|users may)\b",
         re.IGNORECASE,
     )
     fact_keyword_regex = re.compile(
@@ -368,6 +417,12 @@ def extract_frame_from_raw_request(original_intent: str) -> Dict[str, Any]:
             cleaned_line = constraint_headers.sub("", line).strip(" :-*#")
             if cleaned_line:
                 section_map["constraints"].append(cleaned_line)
+            continue
+        elif requirement_headers.match(line):
+            current_section = "requirements"
+            cleaned_line = requirement_headers.sub("", line).strip(" :-*#")
+            if cleaned_line:
+                section_map["requirements"].append(cleaned_line)
             continue
         elif fact_headers.match(line):
             current_section = "facts"
@@ -429,6 +484,8 @@ def extract_frame_from_raw_request(original_intent: str) -> Dict[str, Any]:
         for sent in sentences:
             if non_goal_keyword_regex.search(sent):
                 section_map["non_goals"].append(sent)
+            elif requirement_keyword_regex.search(sent):
+                section_map["requirements"].append(sent)
             elif constraint_keyword_regex.search(sent):
                 section_map["constraints"].append(sent)
             elif unknown_keyword_regex.search(sent):
@@ -476,6 +533,10 @@ def extract_frame_from_raw_request(original_intent: str) -> Dict[str, Any]:
         {"text": text, "provenance": "EXPLICIT_USER_STATEMENT"}
         for text in section_map["constraints"]
     ]
+    explicit_requirements = [
+        {"text": text, "provenance": "EXPLICIT_USER_STATEMENT"}
+        for text in section_map["requirements"]
+    ]
     known_facts = [
         {"text": text, "provenance": "EXPLICIT_USER_STATEMENT"}
         for text in section_map["facts"]
@@ -502,6 +563,7 @@ def extract_frame_from_raw_request(original_intent: str) -> Dict[str, Any]:
         problem_statement=problem_statement,
         explicit_constraints=explicit_constraints,
         explicit_non_goals=explicit_non_goals,
+        explicit_requirements=explicit_requirements,
         known_facts=known_facts,
         unknowns=unknowns,
         assumptions=assumptions,

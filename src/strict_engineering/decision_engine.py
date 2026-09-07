@@ -24,6 +24,7 @@ try:
     from . import decision_coverage
     from . import requirement_generator
     from . import kernel
+    from . import discovery_protocol
 except (ImportError, ValueError):
     try:
         import frame as frame_mod
@@ -38,6 +39,7 @@ except (ImportError, ValueError):
         import decision_coverage
         import requirement_generator
         import kernel
+        import discovery_protocol
     except ImportError:
         frame_mod = None
         concern_mod = None
@@ -78,6 +80,13 @@ class DecisionEngine:
         if project_name:
             frame_data["projectName"] = project_name
         frame_mod.save_frame(self.ws, frame_data)
+
+        # 1b. Create Discovery Protocol Request
+        if discovery_protocol is not None and hasattr(discovery_protocol, "create_discovery_request"):
+            try:
+                discovery_protocol.create_discovery_request(self.ws, frame_data)
+            except Exception:
+                pass
 
         decision_events.record_decision_event(
             workspace_dir=self.ws,
@@ -120,6 +129,28 @@ class DecisionEngine:
             "coverage": cov_data,
             "graph": graph_data,
         }
+
+    def ingest_agent_proposal(self, proposal_data: Dict[str, Any]) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Ingest and validate an external agent proposal (from spec-architect) into the workspace.
+        Syncs graph, status, and coverage upon acceptance.
+        """
+        if discovery_protocol is None or not hasattr(discovery_protocol, "ingest_semantic_concern_proposal"):
+            return False, "Discovery protocol module unavailable", {}
+
+        success, msg, res = discovery_protocol.ingest_semantic_concern_proposal(self.ws, proposal_data)
+        first_c = res[0] if (res and isinstance(res, list)) else (res if isinstance(res, dict) else {})
+        if success:
+            decision_graph.sync_decision_graph(self.ws)
+            stopping_engine.sync_decision_status(self.ws)
+            decision_coverage.sync_decision_coverage(self.ws)
+        return success, msg, first_c
+
+    def get_discovery_status(self) -> Dict[str, Any]:
+        """Load discovery status from .agent-harness/discovery/status.json."""
+        if discovery_protocol is not None and hasattr(discovery_protocol, "load_discovery_status"):
+            return discovery_protocol.load_discovery_status(self.ws)
+        return {"discoveryOrigin": "HEURISTIC_SEED", "proposalCount": 0, "acceptedCount": 0}
 
     def get_next_interaction(self) -> Dict[str, Any]:
         """

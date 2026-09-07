@@ -284,6 +284,7 @@ class TestStep71Generalization(unittest.TestCase):
         """D71-REQ-01: Direct explicit requirements compiled directly from frame intents (INTENT -> REQ)."""
         f_data = frame.create_initial_frame(
             project_goal="Build a high-performance HTTP reverse proxy.",
+            explicit_requirements=["Must forward HTTP/1.1 and HTTP/2 requests to configured upstream targets"],
             explicit_constraints=["Must support TLS 1.3 encryption"],
         )
         frame.save_frame(self.ws, f_data)
@@ -292,16 +293,20 @@ class TestStep71Generalization(unittest.TestCase):
         self.assertTrue(success, f"Intent compilation failed: {msg}")
         self.assertGreaterEqual(len(reqs), 2)
 
-        # Check goal requirement
+        # Invariant 17: Broad goal is NOT an implementation requirement
         goal_req = next((r for r in reqs if r["category"] == "PRODUCT_GOAL"), None)
-        self.assertIsNotNone(goal_req)
-        self.assertEqual(goal_req["intentId"], "INTENT-001")
-        self.assertIn("reverse proxy", goal_req["description"])
+        self.assertIsNone(goal_req, "Broad project goal must not be compiled into requirements.json per Invariant 17")
+
+        # Check explicit requirement
+        core_req = next((r for r in reqs if r["category"] == "CORE_BEHAVIOR"), None)
+        self.assertIsNotNone(core_req)
+        self.assertEqual(core_req["intentId"], "INTENT-002")
+        self.assertIn("forward HTTP/1.1", core_req["description"])
 
         # Check constraint requirement
         constr_req = next((r for r in reqs if r["category"] == "IMPLEMENTATION_CONSTRAINT"), None)
         self.assertIsNotNone(constr_req)
-        self.assertEqual(constr_req["intentId"], "INTENT-002")
+        self.assertEqual(constr_req["intentId"], "INTENT-003")
         self.assertIn("TLS 1.3", constr_req["description"])
 
     def test_d71_req_02_cardinality_0_operational_decision(self):

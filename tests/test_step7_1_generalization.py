@@ -48,8 +48,15 @@ class TestStep71Generalization(unittest.TestCase):
     def test_d71_auth_01_uncertainty_preservation(self):
         """D71-AUTH-01: UNCERTAIN response must NOT create decision and must NOT resolve concern."""
         init = self.engine.initialize_discovery("Build an inventory tracker for warehouse goods.")
-        concerns = init["concerns"]
-        target = concerns[0]
+        target = self.engine.create_human_concern(
+            title="Inventory Item Data Storage",
+            description="Persistence mechanism for warehouse goods inventory",
+            category="PERSISTENCE",
+            candidate_options=[
+                {"id": "OPT-1", "title": "SQLite Local DB", "description": "Local file database"},
+                {"id": "OPT-2", "title": "In-Memory Buffer", "description": "Fast memory buffer"},
+            ]
+        )
         cid = target["id"]
 
         res = self.engine.record_user_decision(
@@ -78,8 +85,15 @@ class TestStep71Generalization(unittest.TestCase):
     def test_d71_auth_02_bare_rejection_preservation(self):
         """D71-AUTH-02: Bare rejection must NOT create decision and must NOT resolve concern."""
         init = self.engine.initialize_discovery("Build a task management service.")
-        concerns = init["concerns"]
-        target = concerns[0]
+        target = self.engine.create_human_concern(
+            title="Task Queue Persistence Model",
+            description="Storage model for task queue management",
+            category="PERSISTENCE",
+            candidate_options=[
+                {"id": "OPT-1", "title": "SQLite Local DB", "description": "Local file database"},
+                {"id": "OPT-2", "title": "In-Memory Buffer", "description": "Fast memory buffer"},
+            ]
+        )
         cid = target["id"]
 
         res = self.engine.record_user_decision(
@@ -107,9 +121,15 @@ class TestStep71Generalization(unittest.TestCase):
     def test_d71_auth_03_rejection_with_custom_alternative(self):
         """D71-AUTH-03: Rejection with explicit custom alternative creates custom decision."""
         init = self.engine.initialize_discovery("Build a data store for customer logs.")
-        # Find persistence concern
-        concerns = init["concerns"]
-        target = next((c for c in concerns if c.get("category") == "PERSISTENCE"), concerns[0])
+        target = self.engine.create_human_concern(
+            title="Customer Log Storage Model",
+            description="Persistence architecture for customer log records",
+            category="PERSISTENCE",
+            candidate_options=[
+                {"id": "OPT-1", "title": "Flat File Append", "description": "Local flat file log"},
+                {"id": "OPT-2", "title": "SQLite Embedded", "description": "Local embedded database"},
+            ]
+        )
         cid = target["id"]
 
         res = self.engine.record_user_decision(
@@ -493,7 +513,7 @@ class TestStep71Generalization(unittest.TestCase):
 
         engine = decision_engine.DecisionEngine(ws_domain)
         init = engine.initialize_discovery(raw_intent, project_name=domain_name)
-        concerns = init["concerns"]
+        concerns = init.get("heuristicSeeds", init.get("seeds", []))
         self.assertGreater(len(concerns), 0)
 
         # Check each concern:

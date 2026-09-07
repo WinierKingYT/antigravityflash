@@ -229,9 +229,9 @@ class TestV1RCSemanticDiscovery(unittest.TestCase):
     def test_rc_sd_05_discovery_origin_labeling(self):
         """RC-SD-05: Concerns are accurately stamped with discoveryOrigin (HEURISTIC_SEED vs AGENT_PROPOSAL)."""
         init = self.engine.initialize_discovery("Build an inventory tracker for warehouse goods.")
-        concerns = init["concerns"]
-        self.assertTrue(len(concerns) > 0)
-        for c in concerns:
+        seeds = init.get("heuristicSeeds", init.get("seeds", []))
+        self.assertTrue(len(seeds) > 0)
+        for c in seeds:
             self.assertEqual(c.get("discoveryOrigin"), "HEURISTIC_SEED")
 
         # Ingest an agent proposal

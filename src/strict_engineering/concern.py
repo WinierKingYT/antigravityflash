@@ -193,8 +193,19 @@ def validate_concern(concern_data: Dict[str, Any]) -> Tuple[bool, List[str]]:
 
     # id
     cid = concern_data.get("id")
-    if not cid or not isinstance(cid, str) or not re.match(r"^CONC-\d{3,}$", cid):
-        errors.append(f"Invalid concern id '{cid}', expected format CONC-XXX (e.g. CONC-001).")
+    is_seed = (
+        concern_data.get("artifactType") == "HEURISTIC_SEED"
+        or concern_data.get("discoveryOrigin") == "HEURISTIC_SEED"
+        or (isinstance(cid, str) and cid.startswith("SEED-"))
+    )
+    if not cid or not isinstance(cid, str):
+        errors.append(f"Invalid concern id '{cid}'. Must be a non-empty string.")
+    elif is_seed:
+        if not re.match(r"^(SEED|CONC)-\d{3,}$", cid):
+            errors.append(f"Invalid seed id '{cid}', expected format SEED-XXX or CONC-XXX.")
+    else:
+        if not re.match(r"^CONC-\d{3,}$", cid):
+            errors.append(f"Invalid concern id '{cid}', expected format CONC-XXX (e.g. CONC-001).")
 
     # title & description
     for f in ["title", "description"]:
@@ -328,10 +339,19 @@ def create_concern(
             d_layer = "MECHANISM"
 
     # Resolve discoveryOrigin
-    raw_origin = kwargs.get("discoveryOrigin", discovery_origin if discovery_origin else "HEURISTIC_SEED")
-    d_origin = str(raw_origin).upper().strip()
-    if d_origin not in DISCOVERY_ORIGINS:
-        d_origin = "HEURISTIC_SEED"
+    raw_origin = kwargs.get("discoveryOrigin", discovery_origin)
+    if raw_origin:
+        d_origin = str(raw_origin).upper().strip()
+        if d_origin not in DISCOVERY_ORIGINS:
+            d_origin = "HEURISTIC_SEED" if str(id).startswith("SEED-") else "AGENT_PROPOSAL"
+    else:
+        d_origin = "HEURISTIC_SEED" if str(id).startswith("SEED-") else "AGENT_PROPOSAL"
+
+    raw_atype = kwargs.get("artifactType", kwargs.get("artifact_type"))
+    if raw_atype:
+        a_type = str(raw_atype).upper().strip()
+    else:
+        a_type = "HEURISTIC_SEED" if (d_origin == "HEURISTIC_SEED" or str(id).startswith("SEED-")) else "CANONICAL_CONCERN"
 
     # Resolve camelCase overrides from kwargs
     downstream = kwargs.get("downstreamImpact", downstream_impact if downstream_impact is not None else 0.5)
@@ -355,6 +375,7 @@ def create_concern(
         "status": clean_status,
         "decisionLayer": d_layer,
         "discoveryOrigin": d_origin,
+        "artifactType": a_type,
         "source": {
             "type": str(source.get("type", "ORIGINAL_INTENT")),
             "reference": str(source.get("reference", "")),
@@ -564,7 +585,7 @@ def propose_heuristic_seeds(frame_data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
     def next_sid() -> str:
         nonlocal idx
-        sid = f"CONC-{str(idx).zfill(3)}"
+        sid = f"SEED-{str(idx).zfill(3)}"
         idx += 1
         return sid
 
@@ -826,4 +847,90 @@ def propose_heuristic_seeds(frame_data: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 propose_semantic_concerns_from_frame = propose_heuristic_seeds
 extract_candidate_concerns_from_frame = propose_heuristic_seeds
+
+
+def create_human_concern(
+    workspace_dir: Union[str, Path],
+    title: str,
+    question: str = "",
+    description: str = "",
+    category: str = "GENERAL",
+    candidate_options: Optional[List[Dict[str, Any]]] = None,
+    risk_level: str = "MEDIUM",
+    source_intent_ids: Optional[List[str]] = None,
+    decision_layer: str = "PRODUCT",
+    is_blocking: bool = True,
+    why_unresolved: str = "Explicitly raised by user",
+    why_material: str = "User-directed product architectural requirement",
+) -> Dict[str, Any]:
+    """
+    Dedicated kernel-authorized path for explicit human concern creation.
+    Stamps discoveryOrigin='HUMAN_INPUT', authority='USER', artifactType='CANONICAL_CONCERN',
+    appends to canonical concerns.json, records HUMAN_CONCERN_CREATED decision event,
+    and synchronizes downstream graph, status, and coverage.
+    """
+    ws = Path(workspace_dir).resolve()
+    concerns = load_concerns(ws)
+    existing_ids = {c.get("id") for c in concerns if c.get("id")}
+
+    idx = 1
+    while f"CONC-{str(idx).zfill(3)}" in existing_ids:
+        idx += 1
+    cid = f"CONC-{str(idx).zfill(3)}"
+
+    desc = description or question or title
+    q = question or description or title
+    new_concern = create_concern(
+        id=cid,
+        title=title,
+        description=desc,
+        category=category,
+        status="ACTIVE",
+        source={"type": "HUMAN_INPUT", "reference": "User explicit concern creation"},
+        source_intent_ids=source_intent_ids or [],
+        risk_level=risk_level,
+        decision_layer=decision_layer,
+        discovery_origin="HUMAN_INPUT",
+        candidate_options=candidate_options or [],
+        artifactType="CANONICAL_CONCERN",
+        is_blocking=is_blocking,
+        uncertainty=0.8,
+        downstream_impact=0.8,
+        risk_reduction_potential=0.7,
+        expected_discrimination=0.8,
+    )
+    new_concern["question"] = q
+    new_concern["whyUnresolved"] = why_unresolved
+    new_concern["whyMaterial"] = why_material
+    new_concern["authority"] = "USER"
+
+    try:
+        from . import question_utility
+        new_concern["questionUtility"] = question_utility.calculate_question_utility(new_concern)
+    except Exception:
+        pass
+
+    concerns.append(new_concern)
+    save_concerns(ws, concerns)
+
+    # Record event
+    try:
+        from . import decision_events
+        decision_events.record_decision_event(
+            workspace_dir=ws,
+            event_type="HUMAN_CONCERN_CREATED",
+            payload={
+                "concernId": cid,
+                "title": title,
+                "category": category,
+                "riskLevel": risk_level,
+                "discoveryOrigin": "HUMAN_INPUT",
+                "authority": "USER",
+            },
+            actor="user",
+        )
+    except Exception:
+        pass
+
+    return new_concern
 

@@ -545,6 +545,21 @@ def ingest_semantic_concern_proposal(
 
         # Evaluate authoritative risk level via risk engine
         calc_risk, _ = concern_mod.evaluate_concern_risk(title, desc, cat) if concern_mod else ("MEDIUM", [])
+        prop_risk = str(prop.get("riskLevel", "")).upper().strip()
+        risk_ranks = getattr(concern_mod, "RISK_RANKS", {"LOW": 0, "MEDIUM": 1, "HIGH": 2, "CRITICAL": 3})
+        if prop_risk in risk_ranks:
+            calc_rank = risk_ranks.get(calc_risk, 1)
+            prop_rank = risk_ranks.get(prop_risk, 1)
+            final_risk = prop_risk if prop_rank >= calc_rank else calc_risk
+        else:
+            final_risk = calc_risk
+
+        # Determine blocking flag
+        explicit_blocking = prop.get("isBlocking", prop.get("is_blocking"))
+        if explicit_blocking is not None:
+            is_blocking = bool(explicit_blocking)
+        else:
+            is_blocking = final_risk in ("CRITICAL", "HIGH") or dec_layer in ("FOUNDATIONAL", "POLICY")
 
         # Convert candidate options to canonical schema
         canon_opts = []
@@ -568,7 +583,7 @@ def ingest_semantic_concern_proposal(
             source={"type": "SEMANTIC_SPEC_ARCHITECT", "reference": f"proposal:{disc_id}/{pid}"},
             source_intent_ids=src_intents,
             status="ACTIVE",
-            risk_level=calc_risk,
+            risk_level=final_risk,
             uncertainty=float(prop.get("uncertainty", 0.8)),
             downstream_impact=float(prop.get("downstreamImpact", 0.8)),
             risk_reduction_potential=float(prop.get("riskReductionPotential", 0.7)),
@@ -576,6 +591,7 @@ def ingest_semantic_concern_proposal(
             candidate_options=canon_opts,
             decisionLayer=dec_layer,
             discovery_origin="AGENT_PROPOSAL",
+            is_blocking=is_blocking,
         ) if concern_mod else {}
 
         if question_utility and canon_c:

@@ -124,7 +124,9 @@ class DecisionEngine:
 
         return {
             "frame": frame_data,
-            "concerns": heuristic_seeds,
+            "canonicalConcerns": [],
+            "concerns": [],
+            "heuristicSeeds": heuristic_seeds,
             "seeds": heuristic_seeds,
             "status": status_data,
             "coverage": cov_data,
@@ -154,6 +156,45 @@ class DecisionEngine:
             decision_coverage.sync_decision_coverage(self.ws)
         return success, msg, first_c
 
+    def create_human_concern(
+        self,
+        title: str,
+        question: str = "",
+        description: str = "",
+        category: str = "GENERAL",
+        candidate_options: Optional[List[Dict[str, Any]]] = None,
+        risk_level: str = "MEDIUM",
+        source_intent_ids: Optional[List[str]] = None,
+        decision_layer: str = "PRODUCT",
+        is_blocking: bool = True,
+        why_unresolved: str = "Explicitly raised by user",
+        why_material: str = "User-directed product architectural requirement",
+    ) -> Dict[str, Any]:
+        """
+        Kernel-authorized direct human concern creation path.
+        Stamps discoveryOrigin='HUMAN_INPUT', authority='USER',
+        validates structure, appends to canonical concerns.json,
+        and syncs graph, status, and coverage.
+        """
+        new_c = concern_mod.create_human_concern(
+            workspace_dir=self.ws,
+            title=title,
+            question=question,
+            description=description,
+            category=category,
+            candidate_options=candidate_options,
+            risk_level=risk_level,
+            source_intent_ids=source_intent_ids,
+            decision_layer=decision_layer,
+            is_blocking=is_blocking,
+            why_unresolved=why_unresolved,
+            why_material=why_material,
+        )
+        decision_graph.sync_decision_graph(self.ws)
+        stopping_engine.sync_decision_status(self.ws)
+        decision_coverage.sync_decision_coverage(self.ws)
+        return new_c
+
     def get_discovery_status(self) -> Dict[str, Any]:
         """Load discovery status from .agent-harness/discovery/status.json."""
         if discovery_protocol is not None and hasattr(discovery_protocol, "load_discovery_status"):
@@ -170,17 +211,34 @@ class DecisionEngine:
         """
         # Sync and check stopping status
         status_data = stopping_engine.sync_decision_status(self.ws)
-        if status_data.get("canProceedToSpec", False):
+        can_proceed = status_data.get("canProceedToSpec", False)
+        if can_proceed:
             return {
                 "action": "PROCEED_TO_SPEC",
                 "status": status_data,
                 "message": f"Discovery complete. Ready to proceed to specification: {status_data.get('reason')}",
             }
 
+        # canProceedToSpec is False: MUST NEVER return PROCEED_TO_SPEC
+        disc_status = self.get_discovery_status()
+        disc_val = disc_status.get("status", "HEURISTIC_DISCOVERY_ONLY")
+
         # Load concerns, graph, and asked questions
         concerns_list = concern_mod.load_concerns(self.ws)
         graph_data = decision_graph.load_decision_graph(self.ws)
         asked_questions = question_utility.load_asked_questions(self.ws)
+        seeds_list = concern_mod.load_heuristic_seeds(self.ws)
+        # If canonical concerns are empty and semantic discovery has not yet executed:
+        if not concerns_list and (disc_val == "HEURISTIC_DISCOVERY_ONLY" or seeds_list):
+            req_path = str(self.ws / ".agent-harness" / "discovery" / "request.json")
+            return {
+                "action": "RUN_SEMANTIC_DISCOVERY",
+                "reason": "HEURISTIC_DISCOVERY_ONLY",
+                "discoveryRequest": req_path,
+                "canProceedToSpec": False,
+                "status": status_data,
+                "message": f"Semantic discovery required: {status_data.get('reason', 'Heuristic discovery only')}",
+            }
 
         # Filter unresolved concerns
         unresolved = [
@@ -190,9 +248,11 @@ class DecisionEngine:
 
         if not unresolved:
             return {
-                "action": "PROCEED_TO_SPEC",
+                "action": "BLOCKED",
+                "reason": status_data.get("reason", "Stopping conditions not met"),
+                "canProceedToSpec": False,
                 "status": status_data,
-                "message": "All concerns resolved. Ready to proceed to specification.",
+                "message": f"Cannot proceed to specification: {status_data.get('reason')}",
             }
 
         # Rank by utility
@@ -306,21 +366,23 @@ class DecisionEngine:
         Process user response for a concern, parse choice, create decision,
         and update all downstream artifacts.
         """
+        # Mechanical check: reject heuristic seeds from direct user decision API
+        seeds_list = concern_mod.load_heuristic_seeds(self.ws)
+        if any(s.get("id") == concern_id for s in seeds_list) or str(concern_id).startswith("SEED-"):
+            raise ValueError(
+                f"HEURISTIC_SEED_NOT_CANONICAL: Concern '{concern_id}' is an advisory heuristic seed and cannot be acted upon directly by record_user_decision. "
+                "Canonical concerns must originate from validated semantic agent discovery or dedicated human concern creation."
+            )
+
         concerns_list = concern_mod.load_concerns(self.ws)
         target_concern = next((c for c in concerns_list if c.get("id") == concern_id), None)
-        from_seeds = False
-        if not target_concern:
-            seeds_list = concern_mod.load_heuristic_seeds(self.ws)
-            target_concern = next((s for s in seeds_list if s.get("id") == concern_id), None)
-            if target_concern:
-                from_seeds = True
-
         if not target_concern:
             raise ValueError(f"Concern '{concern_id}' not found in workspace")
 
-        if from_seeds and not any(c.get("id") == concern_id for c in concerns_list):
-            concerns_list.append(target_concern)
-            concern_mod.save_concerns(self.ws, concerns_list)
+        if target_concern.get("artifactType") == "HEURISTIC_SEED" or target_concern.get("discoveryOrigin") == "HEURISTIC_SEED":
+            raise ValueError(
+                f"HEURISTIC_SEED_NOT_CANONICAL: Concern '{concern_id}' has artifactType='HEURISTIC_SEED' and cannot be acted upon directly by record_user_decision."
+            )
 
         candidate_opts = target_concern.get("candidateOptions")
         if not candidate_opts:

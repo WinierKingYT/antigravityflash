@@ -13,13 +13,16 @@ from typing import Dict, Any, List, Optional, Tuple, Union, Set
 try:
     from . import question_utility
     from . import decision_graph
+    from . import frame as frame_mod
 except (ImportError, ValueError):
     try:
         import question_utility
         import decision_graph
+        import frame as frame_mod
     except ImportError:
         question_utility = None
         decision_graph = None
+        frame_mod = None
 
 DEFAULT_MIN_QUESTION_UTILITY = 0.35
 MAX_QUESTIONS_PER_SESSION = 15
@@ -224,6 +227,7 @@ def evaluate_stopping_conditions(
                     return {
                         "canProceedToSpec": False,
                         "reason": reason,
+                        "readinessState": "SEMANTIC_DISCOVERY_REQUIRED",
                         "unresolvedConcernsCount": len(unresolved),
                         "resolvedConcernsCount": len(resolved),
                         "totalConcernsCount": len(c_list),
@@ -240,42 +244,90 @@ def evaluate_stopping_conditions(
                         "timestamp": utc_now_iso(),
                     }
 
+    readiness_state = "BLOCKED"
     if not graph_valid:
         can_proceed = False
         reason = "Decision graph validation failed (cycles, corruption, or missing references)"
+        readiness_state = "BLOCKED"
     elif not critical_resolved:
         can_proceed = False
         reason = f"Unresolved blocking/critical concerns remain: {', '.join(blocking_concern_ids)}"
+        readiness_state = "BLOCKED"
     elif len(unresolved) == 0:
-        can_proceed = True
-        reason = "All discovered concerns have been resolved"
+        if len(c_list) > 0:
+            can_proceed = True
+            reason = "All discovered concerns have been resolved"
+            readiness_state = "READY_FOR_SPECIFICATION"
+        else:
+            # len(c_list) == 0: EMPTY CONCERNS != AUTOMATIC READY
+            f_data = frame_mod.load_frame(workspace_dir) if (workspace_dir and frame_mod) else {}
+            has_unknowns = bool(f_data.get("unknowns"))
+            has_explicit_reqs = bool(f_data.get("explicitRequirements"))
+
+            disc_status_val = ""
+            if workspace_dir:
+                st_p = Path(workspace_dir).resolve() / ".agent-harness" / "discovery" / "status.json"
+                if not st_p.exists():
+                    st_p = Path(workspace_dir).resolve() / ".agent-harness" / "discovery" / "discovery-status.json"
+                if st_p.exists():
+                    try:
+                        with open(st_p, "r", encoding="utf-8") as sf:
+                            disc_status_val = json.load(sf).get("status", "")
+                    except Exception:
+                        pass
+
+            is_zero_decision_approved = disc_status_val in ("COMPLETED", "APPROVED", "EXPLICIT_ZERO_DECISION", "ZERO_DECISION_APPROVED")
+
+            seeds_exist = False
+            if workspace_dir:
+                s_file = Path(workspace_dir).resolve() / ".agent-harness" / "discovery" / "seeds.json"
+                if s_file.exists():
+                    try:
+                        with open(s_file, "r", encoding="utf-8") as sf:
+                            seeds_exist = bool(json.load(sf))
+                    except Exception:
+                        pass
+
+            if is_zero_decision_approved or (has_explicit_reqs and not has_unknowns and not seeds_exist):
+                can_proceed = True
+                reason = "Fully explicit specification; zero architectural ambiguity"
+                readiness_state = "READY_FOR_SPECIFICATION"
+            else:
+                can_proceed = False
+                reason = "Semantic discovery required: No canonical concerns discovered or approved"
+                readiness_state = "SEMANTIC_DISCOVERY_REQUIRED"
     elif fatigue_reached:
         has_high_utility = any(u >= threshold for u in utilities) or len(blocking_concern_ids) > 0
         if has_high_utility:
             can_proceed = False
             reason = "SESSION_QUESTION_BUDGET_REACHED"
+            readiness_state = "SESSION_QUESTION_BUDGET_REACHED"
         else:
             can_proceed = True
             reason = (
                 f"Session fatigue limit reached ({asked_count}/{max_questions} questions asked); "
                 "no blocking or high-utility concerns remain"
             )
+            readiness_state = "READY_FOR_SPECIFICATION"
     elif all_below_threshold:
         can_proceed = True
         reason = (
             f"All remaining {len(unresolved)} unresolved concerns have utility "
             f"({round(highest_utility, 3)}) below threshold ({threshold})"
         )
+        readiness_state = "READY_FOR_SPECIFICATION"
     else:
         can_proceed = False
         reason = (
             f"{len(unresolved)} unresolved concerns remain with highest utility "
             f"{round(highest_utility, 3)} >= threshold {threshold}"
         )
+        readiness_state = "USER_DECISION_REQUIRED"
 
     return {
         "canProceedToSpec": can_proceed,
         "reason": reason,
+        "readinessState": readiness_state,
         "unresolvedConcernsCount": len(unresolved),
         "resolvedConcernsCount": len(resolved),
         "totalConcernsCount": len(c_list),

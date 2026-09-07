@@ -139,7 +139,9 @@ class TestStep7PackageD(unittest.TestCase):
         )
         self.assertIn("frame", init_res)
         self.assertIn("concerns", init_res)
-        self.assertGreater(len(init_res["concerns"]), 0)
+        self.assertEqual(len(init_res["concerns"]), 0)  # Canonical concerns are empty until semantic discovery or human creation
+        self.assertIn("heuristicSeeds", init_res)
+        self.assertGreater(len(init_res["heuristicSeeds"]), 0)
 
         # Check ledger has recorded FRAME_CREATED and CONCERN_DISCOVERED events
         events = decision_events.load_decision_events(self.ws)
@@ -156,6 +158,18 @@ class TestStep7PackageD(unittest.TestCase):
             raw_intent="Build a local desktop application to save project notes with SQLite and tags."
         )
 
+        interaction = engine.get_next_interaction()
+        self.assertIn(interaction["action"], ["ASK", "SUGGEST", "CHALLENGE", "PROCEED_TO_SPEC", "RUN_SEMANTIC_DISCOVERY"])
+
+        # Create canonical concern to test interaction and decision recording
+        c = engine.create_human_concern(
+            title="Note Storage Persistence",
+            question="How should notes be stored on local disk?",
+            candidate_options=[
+                {"id": "OPT-1", "title": "SQLite Embedded Database", "description": "Local sqlite database", "isRecommended": True},
+                {"id": "OPT-2", "title": "Plain Text Markdown Files", "description": "Flat files", "isRecommended": False},
+            ],
+        )
         interaction = engine.get_next_interaction()
         self.assertIn(interaction["action"], ["ASK", "SUGGEST", "CHALLENGE", "PROCEED_TO_SPEC"])
 

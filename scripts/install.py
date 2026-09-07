@@ -12,6 +12,8 @@ root_dir = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(root_dir / "src"))
 
 from strict_engineering import installer
+from strict_engineering import distribution
+from strict_engineering import observability
 
 
 def main():
@@ -19,7 +21,7 @@ def main():
     python_exe = sys.executable
 
     print("==========================================================")
-    print(" Installing Antigravity Strict Engineering Kernel V1.1.0")
+    print(" Installing Antigravity Strict Engineering Kernel V1.2.0")
     print("==========================================================")
     print(f"Target Gemini Directory: {gemini_dir}")
     print(f"Using Python Executable: {python_exe}")
@@ -29,9 +31,11 @@ def main():
 
     # 1. Copy modules
     src_dir = root_dir / "src" / "strict_engineering"
+    copied_count = 0
     for f in src_dir.glob("*.py"):
         shutil.copy2(f, target_config_dir / f.name)
-    print(f"[OK] Modules copied to {target_config_dir}")
+        copied_count += 1
+    print(f"[OK] Modules copied: {copied_count} files to {target_config_dir}")
 
     # 2. Merge hooks.json non-destructively
     hooks_file = gemini_dir / "config" / "hooks.json"
@@ -66,7 +70,31 @@ def main():
             print(f"[ERROR] Failed installing agents: {', '.join(errs)}")
             sys.exit(1)
 
-    print("\n[SUCCESS] Antigravity Strict Engineering Kernel V1.1.0 successfully installed!")
+    # 5. Generate and save canonical installation manifest
+    manifest = distribution.generate_installation_manifest(
+        modules_dir=target_config_dir,
+        hooks_file=hooks_file,
+        gemini_md_file=gemini_md_file,
+        agents_dir=target_agents,
+        version="1.2.0",
+        install_source=str(root_dir),
+    )
+    manifest_file = distribution.save_installation_manifest(manifest, gemini_dir=gemini_dir)
+    print(f"[OK] Installation manifest: saved to {manifest_file}")
+
+    # 6. Global configuration
+    cfg = distribution.load_global_config(gemini_dir=gemini_dir)
+    distribution.save_global_config(cfg, gemini_dir=gemini_dir)
+    print(f"[OK] Global configuration: verified at {target_config_dir / 'config.json'}")
+
+    # 7. Observability log
+    observability.record_global_event(
+        "INSTALL_COMPLETED",
+        {"version": "1.2.0", "modulesCount": copied_count},
+        gemini_dir=gemini_dir,
+    )
+
+    print("\n[SUCCESS] Antigravity Strict Engineering Kernel V1.2.0 successfully installed!")
 
 
 if __name__ == "__main__":

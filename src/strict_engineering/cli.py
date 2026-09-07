@@ -1,5 +1,5 @@
 """
-Strict Engineering Kernel V1.1.0 - Operational CLI & Project UX
+Strict Engineering Kernel V1.2.0 - Operational CLI, Distribution & Project UX
 Provides the unified command-line entrypoint `strict-engineering` for:
 - version
 - install
@@ -10,6 +10,9 @@ Provides the unified command-line entrypoint `strict-engineering` for:
 - resume
 - enable
 - disable
+- update
+- rollback
+- uninstall
 """
 
 import os
@@ -30,7 +33,7 @@ except (ImportError, ValueError):
         import strict_engineering
         __version__ = strict_engineering.__version__
     except Exception:
-        __version__ = "1.1.0"
+        __version__ = "1.2.0"
 
 try:
     from . import kernel
@@ -38,12 +41,16 @@ try:
     from . import installer
     from . import runtime_safety
     from . import context_registry
+    from . import distribution
+    from . import observability
 except (ImportError, ValueError):
     import kernel  # type: ignore
     import gate  # type: ignore
     import installer  # type: ignore
     import runtime_safety  # type: ignore
     import context_registry  # type: ignore
+    import distribution  # type: ignore
+    import observability  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -100,6 +107,16 @@ def cmd_version(args: argparse.Namespace) -> int:
     else:
         agents_status = "NOT_INSTALLED"
 
+    # Manifest check
+    manifest = distribution.load_installation_manifest(gemini_dir)
+    if manifest:
+        m_ver = manifest.get("version", "unknown")
+        m_health = manifest.get("installationHealth", "HEALTHY")
+        m_mods = len(manifest.get("managedFiles", {}).get("modules", {}))
+        manifest_status = f"V{m_ver} ({m_health}, tracking {m_mods} modules)"
+    else:
+        manifest_status = "NOT_FOUND"
+
     print("==========================================================")
     print(f" Antigravity Strict Engineering Kernel V{__version__}")
     print("==========================================================")
@@ -109,6 +126,7 @@ def cmd_version(args: argparse.Namespace) -> int:
     print(f"Global Hooks ({hook_state}): {hook_detail}")
     print(f"GEMINI Managed Block:       {gemini_status}")
     print(f"Agent Definitions:          {agents_status}")
+    print(f"Installation Manifest:      {manifest_status}")
     print("==========================================================")
     return EXIT_SUCCESS
 
@@ -225,6 +243,30 @@ def cmd_install(args: argparse.Namespace) -> int:
         print(f"[OK] Agent definitions: preserved {existing_agents} existing definitions in {target_agents}")
     else:
         print(f"[WARN] Source agents folder not found; skipping agent install")
+
+    # 5. Generate and save canonical installation manifest
+    target_manifest = distribution.generate_installation_manifest(
+        modules_dir=target_config_dir,
+        hooks_file=hooks_file,
+        gemini_md_file=gemini_md_file,
+        agents_dir=target_agents,
+        version=__version__,
+        install_source=str(repo_root),
+    )
+    manifest_file = distribution.save_installation_manifest(target_manifest, gemini_dir=gemini_dir)
+    print(f"[OK] Installation manifest: saved to {manifest_file} (tracking {len(target_manifest.get('managedFiles', {}).get('modules', {}))} modules)")
+
+    # 6. Global configuration
+    config = distribution.load_global_config(gemini_dir=gemini_dir)
+    distribution.save_global_config(config, gemini_dir=gemini_dir)
+    print(f"[OK] Global configuration: verified at {target_config_dir / 'config.json'}")
+
+    # 7. Observability log
+    observability.record_global_event(
+        "INSTALL_COMPLETED",
+        {"version": __version__, "modulesCount": copied_count},
+        gemini_dir=gemini_dir,
+    )
 
     print(f"\n[SUCCESS] Antigravity Strict Engineering Kernel V{__version__} successfully installed!")
     return EXIT_SUCCESS
@@ -442,6 +484,11 @@ def cmd_status(args: argparse.Namespace) -> int:
 
     completion_ready = (len(blocked_reasons) == 0 and phase in {"VERIFICATION", "COMPLETE"})
 
+    # Observability & telemetry
+    latency_summary = observability.get_latency_summary(gemini_dir)
+    recent_events = observability.load_global_events(limit=5, gemini_dir=gemini_dir)
+    last_event = recent_events[-1] if recent_events else None
+
     data = {
         "active": is_active,
         "workspace": str(workspace),
@@ -460,6 +507,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         "circuitBreaker": {
             "tripped": cb_tripped,
             "consecutiveContinues": cb_consecutive,
+        },
+        "telemetry": {
+            "latency": latency_summary,
+            "lastEvent": last_event,
         },
         "completionReady": completion_ready,
         "blockedReasons": blocked_reasons,
@@ -487,6 +538,10 @@ def cmd_status(args: argparse.Namespace) -> int:
             print(f"  - {bc}")
     if cb_tripped:
         print(f"Circuit Breaker:      TRIPPED ({cb_consecutive} continues without progress)")
+    if latency_summary["count"] > 0:
+        print(f"Hook Latency:         p50={latency_summary['p50Ms']}ms, p95={latency_summary['p95Ms']}ms, max={latency_summary['maxMs']}ms ({latency_summary['count']} samples)")
+    if last_event:
+        print(f"Last Runtime Event:   {last_event.get('eventType')} ({last_event.get('timestamp')})")
     print("----------------------------------------------------------")
     if completion_ready:
         print(f"Completion Readiness: READY TO COMPLETE")
@@ -703,9 +758,51 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         import strict_engineering.installer
         import strict_engineering.runtime_safety
         import strict_engineering.context_registry
+        import strict_engineering.distribution
+        import strict_engineering.observability
         add_check("Package/import health", "PASS", "All kernel submodules imported cleanly")
     except Exception as e:
         add_check("Package/import health", "FAIL", f"Failed importing kernel modules: {e}", "Reinstall package using 'pip install .'.")
+
+    # 15. Installation manifest & drift
+    manifest = distribution.load_installation_manifest(gemini_dir)
+    if not manifest:
+        add_check("Installation manifest", "WARN", "manifest.json not found", "Run 'strict-engineering install' to generate manifest.")
+    else:
+        m_ok, m_issues = distribution.verify_manifest_integrity(gemini_dir)
+        if m_ok:
+            mod_count = len(manifest.get("managedFiles", {}).get("modules", {}))
+            add_check("Installation manifest", "PASS", f"Manifest valid ({mod_count} module hashes match disk)")
+        else:
+            add_check("Installation manifest", "FAIL", f"Module hash drift detected: {'; '.join(m_issues)}", "Run 'strict-engineering update' or 'strict-engineering install'.")
+
+    # 16. Observability log
+    obs_file = gemini_dir / "config" / "strict-engineering" / "observability.jsonl"
+    if obs_file.exists():
+        obs_size_kb = round(obs_file.stat().st_size / 1024, 1)
+        add_check("Observability log", "PASS", f"Log active at {obs_file} ({obs_size_kb} KB)")
+    else:
+        add_check("Observability log", "PASS", "No observability events logged yet")
+
+    # Verbose diagnostics
+    if getattr(args, "verbose", False):
+        # 17. Rollback snapshots
+        snapshots = distribution.list_rollback_snapshots(gemini_dir)
+        if snapshots:
+            add_check("Rollback snapshots", "PASS", f"{len(snapshots)} snapshot(s) available (latest: {snapshots[0]['snapshotId']})")
+        else:
+            add_check("Rollback snapshots", "WARN", "No rollback snapshots available")
+
+        # 18. Hook latency telemetry
+        lat = observability.get_latency_summary(gemini_dir)
+        if lat["count"] > 0:
+            add_check("Hook latency stats", "PASS", f"p50={lat['p50Ms']}ms, p95={lat['p95Ms']}ms, max={lat['maxMs']}ms ({lat['count']} calls)")
+        else:
+            add_check("Hook latency stats", "PASS", "Zero recorded hook calls")
+
+        # 19. Global configuration
+        cfg = distribution.load_global_config(gemini_dir)
+        add_check("Global configuration", "PASS", f"Source={cfg.get('distributionSource')}, MaxContinues={cfg.get('maxAutomaticContinues')}")
 
     # Summarize
     pass_cnt = sum(1 for c in checks if c["status"] == "PASS")
@@ -840,12 +937,144 @@ def cmd_disable(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Command: update
+# ---------------------------------------------------------------------------
+def cmd_update(args: argparse.Namespace) -> int:
+    """Check for or apply transactional updates with automatic rollback."""
+    gemini_dir = get_default_gemini_dir()
+
+    if getattr(args, "check", False):
+        print("Checking for Strict Engineering updates...")
+        avail, cur, lat = distribution.check_for_updates()
+        print(f"Current installed version: {cur}")
+        print(f"Latest available version:  {lat}")
+        if avail:
+            print("[INFO] A newer version is available. Run 'strict-engineering update' to install.")
+        else:
+            print("[OK] Strict Engineering is up to date.")
+        return EXIT_SUCCESS
+
+    source_dir = Path(args.source).resolve() if getattr(args, "source", None) else None
+    target_ver = getattr(args, "target_version", None) or None
+    force = getattr(args, "force", False)
+
+    print("==========================================================")
+    print(" Updating Antigravity Strict Engineering Kernel")
+    print("==========================================================")
+    ok, msg, manifest = distribution.update_installation(
+        source_dir=source_dir,
+        target_version=target_ver,
+        gemini_dir=gemini_dir,
+        force=force,
+    )
+    if ok:
+        print(f"[SUCCESS] {msg}")
+        return EXIT_SUCCESS
+    else:
+        print(f"[FAIL] {msg}")
+        return EXIT_OPERATIONAL_FAILURE
+
+
+# ---------------------------------------------------------------------------
+# Command: rollback
+# ---------------------------------------------------------------------------
+def cmd_rollback(args: argparse.Namespace) -> int:
+    """Restore last known-good installation from backups."""
+    gemini_dir = get_default_gemini_dir()
+
+    if getattr(args, "list", False):
+        snapshots = distribution.list_rollback_snapshots(gemini_dir)
+        print("==========================================================")
+        print(" Strict Engineering Rollback Snapshots")
+        print("==========================================================")
+        if not snapshots:
+            print("No rollback snapshots found.")
+        else:
+            for s in snapshots:
+                print(f"- Snapshot ID:  {s['snapshotId']}")
+                print(f"  Version:      {s.get('version', 'unknown')}")
+                print(f"  Installed At: {s.get('installedAt', 'unknown')}")
+                print(f"  Modules:      {len(s.get('files', []))} files")
+                print()
+        print("==========================================================")
+        return EXIT_SUCCESS
+
+    snapshot_id = getattr(args, "snapshot", None) or None
+    dry_run = getattr(args, "dry_run", False)
+
+    print("==========================================================")
+    print(f" Strict Engineering Rollback {'(DRY RUN)' if dry_run else ''}")
+    print("==========================================================")
+    print("INVARIANT: Rollback only restores global kernel modules and hooks.")
+    print("           Project application code and .agent-harness are NEVER touched.")
+    print("----------------------------------------------------------")
+
+    ok, msg, notes = distribution.rollback_installation(
+        backup_id=snapshot_id,
+        gemini_dir=gemini_dir,
+        dry_run=dry_run,
+    )
+
+    for note in notes:
+        print(f"  * {note}")
+
+    if ok:
+        print(f"[SUCCESS] {msg}")
+        return EXIT_SUCCESS
+    else:
+        print(f"[FAIL] {msg}")
+        return EXIT_OPERATIONAL_FAILURE
+
+
+# ---------------------------------------------------------------------------
+# Command: uninstall
+# ---------------------------------------------------------------------------
+def cmd_uninstall(args: argparse.Namespace) -> int:
+    """Surgically remove Strict Engineering without altering unrelated configurations."""
+    gemini_dir = get_default_gemini_dir()
+    workspace = Path(args.workspace or os.getcwd()).resolve()
+    dry_run = getattr(args, "dry_run", False)
+    purge_harness = getattr(args, "purge_harness", False)
+
+    print("==========================================================")
+    print(f" Strict Engineering Uninstall {'(DRY RUN)' if dry_run else ''}")
+    print("==========================================================")
+    print("PRESERVATION GUARANTEES:")
+    print("  - Custom hooks in hooks.json are PRESERVED")
+    print("  - Custom user instructions in GEMINI.md are PRESERVED")
+    print("  - Custom user agents in config/agents/ are PRESERVED")
+    print("  - Project application code is NEVER TOUCHED")
+    if not purge_harness:
+        print("  - Project .agent-harness is PRESERVED (use --purge-harness to remove)")
+    else:
+        print(f"  - Project .agent-harness will be PURGED at {workspace}")
+    print("----------------------------------------------------------")
+
+    ok, msg, actions = distribution.uninstall_kernel(
+        gemini_dir=gemini_dir,
+        dry_run=dry_run,
+        workspace=workspace if purge_harness else None,
+        purge_harness=purge_harness,
+    )
+
+    for act in actions:
+        print(f"  * {act}")
+
+    if ok:
+        print(f"\n[SUCCESS] {msg}")
+        return EXIT_SUCCESS
+    else:
+        print(f"\n[FAIL] {msg}")
+        return EXIT_OPERATIONAL_FAILURE
+
+
+# ---------------------------------------------------------------------------
 # Parser Configuration & Main Entrypoint
 # ---------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="strict-engineering",
-        description="Antigravity Strict Engineering Kernel - Operational CLI & UX",
+        description="Antigravity Strict Engineering Kernel - Operational CLI, Distribution & UX",
     )
     subparsers = parser.add_subparsers(dest="command", help="Command to execute")
 
@@ -903,6 +1132,28 @@ def build_parser() -> argparse.ArgumentParser:
     p_dis.add_argument("--global", dest="is_global", action="store_true", default=True, help="Disable hooks in ~/.gemini/config/hooks.json")
     p_dis.add_argument("--project", action="store_true", help="Disable harness in project state.json")
     p_dis.set_defaults(func=cmd_disable)
+
+    # update
+    p_upd = subparsers.add_parser("update", help="Check for or apply transactional updates with automatic rollback")
+    p_upd.add_argument("--check", action="store_true", help="Check for updates without applying")
+    p_upd.add_argument("--source", type=str, default="", help="Local directory source to update from")
+    p_upd.add_argument("--target-version", type=str, default="", help="Target version string")
+    p_upd.add_argument("--force", action="store_true", help="Force update even if same version")
+    p_upd.set_defaults(func=cmd_update)
+
+    # rollback
+    p_rb = subparsers.add_parser("rollback", help="Restore last known-good installation from backups")
+    p_rb.add_argument("--snapshot", type=str, default="", help="Specific snapshot ID to restore")
+    p_rb.add_argument("--list", action="store_true", help="List available rollback snapshots")
+    p_rb.add_argument("--dry-run", action="store_true", help="Preview rollback without modifying files")
+    p_rb.set_defaults(func=cmd_rollback)
+
+    # uninstall
+    p_un = subparsers.add_parser("uninstall", help="Non-destructively remove Strict Engineering")
+    p_un.add_argument("--dry-run", action="store_true", help="Preview removal without modifying files")
+    p_un.add_argument("--workspace", type=str, default="", help="Target workspace path")
+    p_un.add_argument("--purge-harness", action="store_true", help="Also remove .agent-harness from current workspace")
+    p_un.set_defaults(func=cmd_uninstall)
 
     return parser
 

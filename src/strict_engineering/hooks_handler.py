@@ -14,12 +14,18 @@ from pathlib import Path
 # Add current module directory to sys.path
 sys.path.insert(0, str(Path(__file__).parent.resolve()))
 
+import time
 import kernel
 import gate
 import context_registry
+try:
+    import observability
+except ImportError:
+    observability = None
 
 
 def main():
+    start_time = time.time()
     if len(sys.argv) < 2:
         print(json.dumps({"decision": "allow"}))
         return
@@ -81,6 +87,18 @@ def main():
 
         else:
             print(json.dumps({"decision": "allow"}))
+
+        if observability:
+            try:
+                lat = (time.time() - start_time) * 1000
+                observability.record_global_event(
+                    "HOOK_INVOCATION",
+                    {"action": action},
+                    workspace=workspace,
+                    latency_ms=lat,
+                )
+            except Exception:
+                pass
 
     except Exception as ex:
         sys.stderr.write(f"[Strict-Engineering-Hook] Critical Error in {action}: {ex}\n")

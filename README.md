@@ -1,10 +1,10 @@
-# Antigravity Strict Engineering Kernel (V1.1.0)
+# Antigravity Strict Engineering Kernel (V1.2.0)
 
 A deterministic, risk-adaptive, reality-hardened, and adversarial reliability kernel for Google Antigravity on Windows.
 
 [![CI](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml/badge.svg)](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-1.1.0-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-502%20passed-brightgreen.svg)](run_tests.py)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-520%20passed-brightgreen.svg)](run_tests.py)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ---
@@ -130,7 +130,7 @@ antigravity-strict-engineering-kernel/
 │   ├── spec-architect/agent.md         # Atomic specification architect
 │   └── test-oracle/agent.md            # Acceptance criteria & contract locking
 ├── src/strict_engineering/             # Canonical Kernel Source Modules
-│   ├── __init__.py                    # Version 1.1.0
+│   ├── __init__.py                    # Version 1.2.0
 │   ├── acceptance_protocol.py         # Test Oracle Given-When-Then acceptance locking
 │   ├── adversarial_verification.py    # Property, fuzz, mutation & fault injection
 │   ├── baseline.py                    # Workspace health baseline & regression delta
@@ -147,6 +147,7 @@ antigravity-strict-engineering-kernel/
 │   ├── decision_graph.py              # Directed acyclic decision dependency graph
 │   ├── disagreement.py                # Multi-model verdict consensus & disagreement analyzer
 │   ├── discovery_protocol.py          # Machine-visible semantic discovery protocol (Schema 7.2)
+│   ├── distribution.py                # Manifest, transactional update & non-destructive uninstall
 │   ├── environment_detector.py        # Container, ecosystem & lockfile inspector
 │   ├── environment_factory.py         # Clean scratch environment factory & subprocess runner
 │   ├── evidence_resolution.py         # Multi-model evidence reconciliation gate
@@ -159,6 +160,7 @@ antigravity-strict-engineering-kernel/
 │   ├── installer.py                   # Atomic installer & configuration manager
 │   ├── interaction_policy.py          # ASK / SUGGEST / CHALLENGE / PROCEED policy
 │   ├── kernel.py                      # State machine, evidence chain & stale invalidator
+│   ├── observability.py               # Privacy-safe bounded event logging & latency telemetry
 │   ├── question_utility.py            # Value-of-information question filter
 │   ├── reporting.py                   # Multi-schema canonical report generator
 │   ├── reproducibility.py             # Double-build SHA-256 bit-for-bit comparator
@@ -177,7 +179,8 @@ antigravity-strict-engineering-kernel/
 ├── .github/workflows/ci.yml           # GitHub Actions CI workflow
 ├── GEMINI.md                          # Antigravity strict engineering rules
 ├── hooks.json                         # Antigravity lifecycle hooks configuration
-├── pyproject.toml                     # Package specification (v1.1.0)
+├── plugin.json                        # Antigravity plugin descriptor compatibility
+├── pyproject.toml                     # Package specification (v1.2.0)
 └── run_tests.py                       # Top-level test runner
 ```
 
@@ -207,9 +210,12 @@ strict-engineering status
 
 # Run comprehensive environment & harness diagnostics
 strict-engineering doctor
+
+# Run diagnostics with manifest drift, rollback snapshots & latency percentiles
+strict-engineering doctor --verbose
 ```
 
-### 4. Operational Controls
+### 4. Operational Controls & Lifecycle
 
 ```bash
 # Pause active execution cleanly without losing state
@@ -223,13 +229,25 @@ strict-engineering disable
 
 # Re-enable hooks
 strict-engineering enable
+
+# Check for updates or apply atomic update with rollback protection
+strict-engineering update --check
+strict-engineering update
+
+# Safe rollback restoring last known-good snapshot
+strict-engineering rollback --list
+strict-engineering rollback
+
+# Non-destructive uninstall (preserves custom user hooks, agents, and GEMINI.md)
+strict-engineering uninstall --dry-run
+strict-engineering uninstall
 ```
 
 ---
 
 ## 🧪 Running Tests
 
-To run the complete suite of 502 tests across all 23 test modules:
+To run the complete suite of 520 tests across all 24 test modules:
 
 ```bash
 python run_tests.py
@@ -245,8 +263,8 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ## 📊 Verification Metrics
 
-- **Total Test Cases:** 502
-- **Total Test Suites:** 23
+- **Total Test Cases:** 520
+- **Total Test Suites:** 24
 - **Pass Rate:** 100% (Zero Failures, Zero Errors)
 - **Zero External Dependencies:** Built entirely with Python standard library for maximum portability and zero supply-chain risk.
 

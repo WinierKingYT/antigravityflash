@@ -611,6 +611,17 @@ class DecisionEngine:
         # Downstream Requirement Invalidation (Change Propagation)
         invalidated_reqs = self.propagate_decision_change(old_decision_id, new_dec["id"])
 
+        # Reactivate harness if inactive or complete
+        if kernel is not None:
+            try:
+                st = kernel.load_state(self.ws)
+                st["active"] = True
+                st["phase"] = "IMPLEMENTATION"
+                st["finalAuditPassed"] = False
+                kernel.save_state(self.ws, st)
+            except Exception:
+                pass
+
         # Sync graph, status, coverage
         decision_graph.sync_decision_graph(self.ws)
         status_data = stopping_engine.sync_decision_status(self.ws)

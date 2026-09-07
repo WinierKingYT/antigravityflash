@@ -65,8 +65,12 @@ def merge_hooks_json(
 
         backup_path = create_backup(hooks_path, backup_dir)
 
-    escaped_python = str(python_exe).replace("\\", "\\\\")
-    escaped_script = str(Path(hooks_handler_script).resolve()).replace("\\", "\\\\")
+    py_cmd = str(python_exe)
+    script_cmd = str(Path(hooks_handler_script).resolve())
+    if " " in py_cmd and not (py_cmd.startswith('"') and py_cmd.endswith('"')):
+        py_cmd = f'"{py_cmd}"'
+    if " " in script_cmd and not (script_cmd.startswith('"') and script_cmd.endswith('"')):
+        script_cmd = f'"{script_cmd}"'
 
     strict_hooks = {
         "PreToolUse": [
@@ -75,7 +79,7 @@ def merge_hooks_json(
                 "hooks": [
                     {
                         "type": "command",
-                        "command": f"{escaped_python} {escaped_script} pre-tool",
+                        "command": f"{py_cmd} {script_cmd} pre-tool",
                         "timeout": 15,
                     }
                 ],
@@ -84,14 +88,14 @@ def merge_hooks_json(
         "PreInvocation": [
             {
                 "type": "command",
-                "command": f"{escaped_python} {escaped_script} pre-invocation",
+                "command": f"{py_cmd} {script_cmd} pre-invocation",
                 "timeout": 10,
             }
         ],
         "Stop": [
             {
                 "type": "command",
-                "command": f"{escaped_python} {escaped_script} stop",
+                "command": f"{py_cmd} {script_cmd} stop",
                 "timeout": 30,
             }
         ],

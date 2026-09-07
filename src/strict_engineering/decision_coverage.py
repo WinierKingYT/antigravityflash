@@ -181,39 +181,56 @@ def build_decision_coverage_matrix(
 
     # 1. Tier 1: Intents from Frame
     intents: List[Dict[str, Any]] = []
-    intent_idx = 0
+    canonical_intents = f_data.get("intents", [])
+    if canonical_intents:
+        for idx, it in enumerate(canonical_intents):
+            if isinstance(it, dict):
+                intents.append({
+                    "intentId": it.get("id") or it.get("intentId", f"INTENT-{str(idx+1).zfill(3)}"),
+                    "type": it.get("category", "GOAL"),
+                    "text": it.get("text", str(it)),
+                    "concerns": [],
+                })
+            else:
+                intents.append({
+                    "intentId": f"INTENT-{str(idx+1).zfill(3)}",
+                    "type": "GOAL",
+                    "text": str(it),
+                    "concerns": [],
+                })
+    else:
+        intent_idx = 0
+        # Goals
+        for g in f_data.get("goals", []):
+            intents.append({
+                "intentId": f"INTENT-GOAL-{intent_idx}",
+                "type": "GOAL",
+                "text": str(g),
+                "concerns": [],
+            })
+            intent_idx += 1
 
-    # Goals
-    for g in f_data.get("goals", []):
-        intents.append({
-            "intentId": f"INTENT-GOAL-{intent_idx}",
-            "type": "GOAL",
-            "text": str(g),
-            "concerns": [],
-        })
-        intent_idx += 1
+        # Constraints
+        c_idx = 0
+        for c in f_data.get("constraints", []):
+            intents.append({
+                "intentId": f"INTENT-CONST-{c_idx}",
+                "type": "CONSTRAINT",
+                "text": str(c),
+                "concerns": [],
+            })
+            c_idx += 1
 
-    # Constraints
-    c_idx = 0
-    for c in f_data.get("constraints", []):
-        intents.append({
-            "intentId": f"INTENT-CONST-{c_idx}",
-            "type": "CONSTRAINT",
-            "text": str(c),
-            "concerns": [],
-        })
-        c_idx += 1
-
-    # Non-goals
-    ng_idx = 0
-    for ng in f_data.get("nonGoals", []):
-        intents.append({
-            "intentId": f"INTENT-NONGOAL-{ng_idx}",
-            "type": "NON_GOAL",
-            "text": str(ng),
-            "concerns": [],
-        })
-        ng_idx += 1
+        # Non-goals
+        ng_idx = 0
+        for ng in f_data.get("nonGoals", []):
+            intents.append({
+                "intentId": f"INTENT-NONGOAL-{ng_idx}",
+                "type": "NON_GOAL",
+                "text": str(ng),
+                "concerns": [],
+            })
+            ng_idx += 1
 
     # Link Intents -> Concerns
     for intent in intents:
@@ -281,7 +298,12 @@ def build_decision_coverage_matrix(
         rid = r.get("id") or r.get("req_id")
         d_ref = r.get("decisionId") or r.get("sourceDecision")
         c_ref = r.get("concernId") or r.get("sourceConcern")
-        sources = r.get("sources", [])
+        sources = list(r.get("sources", []))
+        for s_id in (r.get("sourceIntentIds", []) or []):
+            if s_id not in sources:
+                sources.append(s_id)
+        if r.get("intentId") and r["intentId"] not in sources:
+            sources.append(r["intentId"])
 
         # Check if requirement has any valid trace
         has_trace = False

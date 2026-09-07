@@ -1,0 +1,55 @@
+{
+  "dogfood_a": {
+    "project": "DOGFOOD-A",
+    "domain": "Explicit Small CLI",
+    "rawRequest": "Build a Python command-line utility named hashmanifest that computes SHA-256 and MD5 checksums for files in a target directory and emits a deterministic JSON manifest file with relative paths and hexadecimal digests sorted alphabetically by file path. The CLI must accept --dir <path> and --output <path> flags, exit with code 0 on success, exit with code 2 if the target directory does not exist, and accept an optional --algorithm flag supporting sha256 or md5.",
+    "requirementsCount": 7,
+    "questionsAsked": 0,
+    "cleanEnvTest": "PASS",
+    "runtimeSmoke": "PASS",
+    "promotion": "SUCCESS",
+    "verdict": "COMPLETE"
+  },
+  "dogfood_b": {
+    "project": "DOGFOOD-B",
+    "domain": "Ambiguous Local App",
+    "rawRequest": "Build a local developer memo manager named memokeeper for capturing quick code snippets and notes from the terminal with search by tag. It should work completely offline on a single machine.",
+    "semanticConcernsDiscovered": 1,
+    "questionsAsked": 1,
+    "questionsAvoided": 3,
+    "decisionsRecorded": 1,
+    "requirementsCount": 1,
+    "cleanEnvTest": "PASS",
+    "persistenceVerified": true,
+    "promotion": "SUCCESS",
+    "verdict": "COMPLETE"
+  },
+  "dogfood_c": {
+    "project": "DOGFOOD-C",
+    "domain": "Authorization Service",
+    "rawRequest": "Build a lightweight REST service named docvault where authenticated users can create, read, and delete documents. Documents have an owner and can be marked public or private. Any user can read public documents.",
+    "criticalAmbiguityExpected": 1,
+    "criticalAmbiguityFound": 1,
+    "builderSelfCertBlocked": true,
+    "seededDefectCaught": true,
+    "negativeAuthTestPassed": true,
+    "promotion": "SUCCESS",
+    "verdict": "COMPLETE"
+  },
+  "dogfood_d": {
+    "project": "DOGFOOD-D",
+    "domain": "State & Recovery",
+    "rawRequest": "Build a local task ledger application named taskjournal that logs state transitions (CREATED, IN_PROGRESS, COMPLETED, CANCELLED) and allows recovering state from a journal log.",
+    "dirtyWorkspacePreserved": true,
+    "seededDefectCaught": true,
+    "stalePropagationVerified": true,
+    "fingerprintInvalidated": true,
+    "gateBlockedOnStale": true,
+    "verdict": "VERIFIED_STALE_PROPAGATION"
+  },
+  "hidden_dependency": {
+    "status": "PASSED",
+    "defectCaught": true
+  },
+  "overallVerdict": "ALL_DOGFOOD_PROJECTS_PASSED"
+}

@@ -314,6 +314,10 @@ class Step51RealityGapTestSuite(unittest.TestCase):
         self.assertEqual(merged["custom-user-plugin"]["customSetting"], 12345)
         self.assertIn("analytics", merged)
         self.assertIn("strict-engineering", merged)
+        cmd_str = merged["strict-engineering"]["PreToolUse"][0]["hooks"][0]["command"]
+        self.assertNotIn("\\\\", cmd_str)
+        raw_text = fake_hooks.read_text(encoding="utf-8")
+        self.assertNotIn("\\\\\\\\", raw_text)
 
     def test_rg14_gemini_md_managed_block_preserves_custom_instructions(self):
         """

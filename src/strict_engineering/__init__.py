@@ -19,7 +19,7 @@ from . import decision_coverage
 from . import requirement_generator
 from . import decision_engine
 
-__version__ = "1.0.0"
+__version__ = "1.0.1"
 
 
 

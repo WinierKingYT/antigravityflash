@@ -506,8 +506,9 @@ def render_report_text(summary: Dict[str, Any]) -> str:
 
     # Step 6S.1 Format (6S.1)
     if version in {"6S.1", "6S.1.0"} or summary.get("schemaVersion") in {"6S.1", "6S.1.0"} or summary.get("finalVerdict") in {"STEP 6S.1 VERIFIED", "STEP 6S.1 PARTIALLY VERIFIED", "STEP 6S.1 FAILED"}:
+        _default_title = "ANTIGRAVITY STEP 6S.1\nRUNTIME CONTEXT PROOF & FINAL TRUST CLOSURE"
         lines = [
-            f"{summary.get('title', 'ANTIGRAVITY STEP 6S.1\nRUNTIME CONTEXT PROOF & FINAL TRUST CLOSURE')}",
+            f"{summary.get('title', _default_title)}",
             "",
             f"VERIFICATION MODE: {summary.get('verificationMode', 'SINGLE_MODEL_BLIND_CONTEXT_PROOF')}",
             "",
@@ -598,8 +599,9 @@ def render_report_text(summary: Dict[str, Any]) -> str:
 
     # Step 6S Format (6S.0)
     if version == "6S.0" or "blindVerification" in summary or summary.get("finalVerdict") in {"STEP 6S VERIFIED", "STEP 6S PARTIALLY VERIFIED", "STEP 6S FAILED"}:
+        _default_title = "ANTIGRAVITY STEP 6S\nSINGLE-MODEL BLIND VERIFICATION & EVIDENCE RESOLUTION GATE"
         lines = [
-            f"{summary.get('title', 'ANTIGRAVITY STEP 6S\nSINGLE-MODEL BLIND VERIFICATION & EVIDENCE RESOLUTION GATE')}",
+            f"{summary.get('title', _default_title)}",
             "",
             f"VERIFICATION MODE: {summary.get('verificationMode', 'SINGLE_MODEL_BLIND')}",
             "",
@@ -680,8 +682,9 @@ def render_report_text(summary: Dict[str, Any]) -> str:
 
     # Step 5.1 Format (5.1.0)
     if version == "5.1.0" or "repositoryAudit" in summary:
+        _default_title = "ANTIGRAVITY STEP 5.1\nREALITY GAP HARDENING"
         lines = [
-            f"{summary.get('title', 'ANTIGRAVITY STEP 5.1\nREALITY GAP HARDENING')}",
+            f"{summary.get('title', _default_title)}",
             "",
             "REPOSITORY AUDIT:",
         ]
@@ -831,8 +834,9 @@ def render_report_text(summary: Dict[str, Any]) -> str:
 
     # Step 6 Format (6.0.0)
     if version == "6.0.0" or "independentModel" in summary or summary.get("finalVerdict") in {"STEP 6 VERIFIED", "STEP 6 PARTIALLY VERIFIED"}:
+        _default_title = "ANTIGRAVITY STEP 6\nINDEPENDENT MODEL VERIFICATION + DISAGREEMENT GATE"
         lines = [
-            f"{summary.get('title', 'ANTIGRAVITY STEP 6\nINDEPENDENT MODEL VERIFICATION + DISAGREEMENT GATE')}",
+            f"{summary.get('title', _default_title)}",
             "",
             "PREVIOUS TEST BASELINE:",
         ]
@@ -916,8 +920,9 @@ def render_report_text(summary: Dict[str, Any]) -> str:
         limits = summary.get("realLimitations", [])
         verdict = summary.get("finalVerdict", "STEP 2 VERIFIED")
 
+        _default_title = "ANTIGRAVITY STEP 2\nWORKTREE SANDBOX + VERIFIED PROMOTION"
         lines = [
-            f"{summary.get('title', 'ANTIGRAVITY STEP 2\nWORKTREE SANDBOX + VERIFIED PROMOTION')}",
+            f"{summary.get('title', _default_title)}",
             "",
             "Previous V4.1 reporting inconsistency:",
             f"ROOT CAUSE: {reconc.get('rootCause', 'N/A')}",
@@ -975,8 +980,9 @@ def render_report_text(summary: Dict[str, Any]) -> str:
 
     # Step 3 Format (3.0.0)
     if version == "3.0.0":
+        _default_title = "ANTIGRAVITY STEP 3\nRISK ENGINE + VERIFICATION POLICY COMPILER"
         lines = [
-            f"{summary.get('title', 'ANTIGRAVITY STEP 3\nRISK ENGINE + VERIFICATION POLICY COMPILER')}",
+            f"{summary.get('title', _default_title)}",
             "",
             "PREVIOUS TESTS:",
             f"V4.1: {summary.get('previousTests', {}).get('V4.1', '15/15 PASS')}",
@@ -1060,8 +1066,9 @@ def render_report_text(summary: Dict[str, Any]) -> str:
 
     # Step 4 Format (4.0.0)
     if version == "4.0.0":
+        _default_title = "ANTIGRAVITY STEP 4\nTEST QUALITY & ADVERSARIAL VERIFICATION ENGINE"
         lines = [
-            f"{summary.get('title', 'ANTIGRAVITY STEP 4\nTEST QUALITY & ADVERSARIAL VERIFICATION ENGINE')}",
+            f"{summary.get('title', _default_title)}",
             "",
             "PREVIOUS TEST BASELINE:",
         ]
@@ -1165,8 +1172,9 @@ def render_report_text(summary: Dict[str, Any]) -> str:
         return "\n".join(lines)
 
     # Step 5 Format (5.0.0)
+    _default_title = "ANTIGRAVITY STEP 5\nCLEAN ENVIRONMENT & REPRODUCIBLE BUILD FACTORY"
     lines = [
-        f"{summary.get('title', 'ANTIGRAVITY STEP 5\nCLEAN ENVIRONMENT & REPRODUCIBLE BUILD FACTORY')}",
+        f"{summary.get('title', _default_title)}",
         "",
         "PREVIOUS TEST BASELINE:",
     ]

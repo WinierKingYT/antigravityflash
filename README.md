@@ -1,10 +1,10 @@
-# Antigravity Strict Engineering Kernel (V1.0.0)
+# Antigravity Strict Engineering Kernel (V1.0.1)
 
 A deterministic, risk-adaptive, reality-hardened, and adversarial reliability kernel for Google Antigravity on Windows.
 
 [![CI](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml/badge.svg)](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-462%2B%20passed-brightgreen.svg)](run_tests.py)
+[![Version](https://img.shields.io/badge/version-1.0.1-blue.svg)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-467%20passed-brightgreen.svg)](run_tests.py)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ---
@@ -68,7 +68,7 @@ flowchart TD
         CXAudit[Counterexample Auditor - Anchoring Defense]
         HiddenChecks[Hidden Verification Suite & Check Promoter]
         ContextIso[Runtime Context Proof & Isolation Defense]
-        TrustedHook[HMAC Cryptographic Hook Origin Closure]
+        TrustedHook[Trusted Lifecycle Hook Origin & Context Binding]
     end
 
     CleanEnvFactory --> Step6S
@@ -89,9 +89,9 @@ flowchart TD
    - **Canonical Execution Evidence Model (`ExecutionRecord`):** 9 execution types, 7 origins (`REAL_PROJECT_EXECUTION`, `LIVE_KERNEL_EXECUTION`, `SIMULATED_INTEGRATION`, `KERNEL_UNIT_TEST`, `MOCK`, `MODEL_CLAIM`, `USER_ACCEPTANCE`), scrubbed env/secrets, exit codes, durations, and artifact hashes.
    - **Subprocess Discovery & Verification:** Dependency restore (`npm ci` / `pip install -r`), scratch build execution, real test execution, startup crash detection (`STARTUP_CRASH`), smoke journey testing (`JOURNEY_FAILED`), and SQLite migration verification.
    - **Non-Destructive Atomic Installer:** Managed block `<!-- STRICT_ENGINEERING_KERNEL_START -->` in `GEMINI.md`, JSON-aware merging in `hooks.json`, single backslash escaping, and automated backup/rollback.
-8. **Layer 8 (Step 6S/6S.1 Blind Verification, Context Isolation & Trusted Hook Closure):**
-   - **Context Isolation Proofs:** Verifier evaluates code with zero access to builder transcripts or self-reported claims. Cryptographic execution proofs verify fresh conversation contexts.
-   - **HMAC Hook Origin Closure:** Lifecycle hooks are signed with cryptographic nonce/token exchange to prevent spoofing or unauthorized invocation.
+8. **Layer 8 (Step 6S/6S.1 Blind Verification, Context Isolation & Trusted Hook Origin):**
+   - **Context Isolation Proofs:** Verifier evaluates code with zero access to builder transcripts or self-reported claims. Fresh conversation context and registry tracking verify clean-room execution contexts.
+   - **Trusted Hook Origin & Threat Model:** Runtime context and hook-origin checks are enforced via Antigravity runtime metadata, context expectations, provenance validation, and deterministic state gates. (Note: These checks are runtime and state-bound; they do NOT constitute cryptographically authenticated platform-origin proof unless the underlying platform supplies unforgeable cryptographic signatures. Same-user hostile process resistance remains outside the hard guarantee).
    - **Truth Hierarchy:** `REAL EXECUTION EVIDENCE > DETERMINISTIC STATIC EVIDENCE > VERIFIER ANALYSIS > BUILDER CLAIM`.
 9. **Layer 9 (Step 7 / 7.1 / V1 Decision Intelligence & Semantic Discovery):**
    - **Semantic Discovery Protocol (Schema 7.2):** High-impact product & architecture decisions discovered semantically. Heuristic seeds marked strictly advisory; zero premature implementation.
@@ -130,40 +130,43 @@ antigravity-strict-engineering-kernel/
 │   ├── spec-architect/agent.md         # Atomic specification architect
 │   └── test-oracle/agent.md            # Acceptance criteria & contract locking
 ├── src/strict_engineering/             # Canonical Kernel Source Modules
-│   ├── __init__.py                    # Version 1.0.0
-│   ├── kernel.py                      # State machine, evidence chain & stale invalidator
-│   ├── gate.py                        # Stop gate & PreToolUse security matrix
-│   ├── fingerprint.py                 # SHA-256 workspace & contract hashing
-│   ├── baseline.py                    # Workspace health baseline & regression delta
-│   ├── hooks_handler.py               # Antigravity CLI lifecycle hook dispatcher
-│   ├── sandbox.py                     # Git worktree sandbox manager & promotion
-│   ├── risk_engine.py                 # Multi-factor requirement risk scoring
-│   ├── verification_policy.py         # Dynamic policy compiler
+│   ├── __init__.py                    # Version 1.0.1
+│   ├── acceptance_protocol.py         # Test Oracle Given-When-Then acceptance locking
 │   ├── adversarial_verification.py    # Property, fuzz, mutation & fault injection
-│   ├── environment_detector.py        # Container, ecosystem & lockfile inspector
-│   ├── environment_factory.py         # Clean scratch environment factory & subprocess runner
-│   ├── reproducibility.py             # Double-build SHA-256 bit-for-bit comparator
+│   ├── baseline.py                    # Workspace health baseline & regression delta
 │   ├── blind_verifier.py              # Single-model blind verification engine
-│   ├── counterexample_auditor.py      # Adversarial counterexample auditor
-│   ├── hidden_verification.py         # Hidden verification suite & check promoter
-│   ├── context_registry.py            # Step 6S.1 Context isolation proof registry
-│   ├── trusted_origin.py              # HMAC cryptographic hook origin verification
-│   ├── frame.py                       # User intent extraction & canonical framing
 │   ├── concern.py                     # Schema 7.2 Semantic concern model & risk scoring
+│   ├── consistency_reviewer.py        # Global decision consistency auditor
+│   ├── context_registry.py            # Step 6S.1 Context isolation proof registry
+│   ├── counterexample_auditor.py      # Adversarial counterexample auditor
 │   ├── decision.py                    # Architectural decision ledger & supersession
+│   ├── decision_coverage.py           # 4-tier traceability matrix (Intent->Concern->Decision->Req)
+│   ├── decision_engine.py             # Unified Decision Intelligence facade
 │   ├── decision_events.py             # Append-only cryptographic decision event ledger
 │   ├── decision_graph.py              # Directed acyclic decision dependency graph
-│   ├── question_utility.py            # Value-of-information question filter
-│   ├── interaction_policy.py          # ASK / SUGGEST / CHALLENGE / PROCEED policy
-│   ├── stopping_engine.py             # Stopping conditions & gate synchronization
-│   ├── consistency_reviewer.py        # Global decision consistency auditor
-│   ├── decision_coverage.py           # 4-tier traceability matrix (Intent->Concern->Decision->Req)
-│   ├── requirement_generator.py       # Atomic requirement compilation & contract fingerprints
-│   ├── decision_engine.py             # Unified Decision Intelligence facade
-│   ├── acceptance_protocol.py         # Test Oracle Given-When-Then acceptance locking
+│   ├── disagreement.py                # Multi-model verdict consensus & disagreement analyzer
+│   ├── discovery_protocol.py          # Machine-visible semantic discovery protocol (Schema 7.2)
+│   ├── environment_detector.py        # Container, ecosystem & lockfile inspector
+│   ├── environment_factory.py         # Clean scratch environment factory & subprocess runner
+│   ├── evidence_resolution.py         # Multi-model evidence reconciliation gate
+│   ├── fingerprint.py                 # SHA-256 workspace & contract hashing
+│   ├── frame.py                       # User intent extraction & canonical framing
+│   ├── gate.py                        # Stop gate & PreToolUse security matrix
+│   ├── hidden_verification.py         # Hidden verification suite & check promoter
+│   ├── hooks_handler.py               # Antigravity CLI lifecycle hook dispatcher
+│   ├── independent_model.py           # Independent clean-room verification harness
 │   ├── installer.py                   # Atomic installer & configuration manager
-│   └── reporting.py                   # Multi-schema canonical report generator
-├── tests/                             # Comprehensive Test Suites (21 Suites, 462+ Tests)
+│   ├── interaction_policy.py          # ASK / SUGGEST / CHALLENGE / PROCEED policy
+│   ├── kernel.py                      # State machine, evidence chain & stale invalidator
+│   ├── question_utility.py            # Value-of-information question filter
+│   ├── reporting.py                   # Multi-schema canonical report generator
+│   ├── reproducibility.py             # Double-build SHA-256 bit-for-bit comparator
+│   ├── requirement_generator.py       # Atomic requirement compilation & contract fingerprints
+│   ├── risk_engine.py                 # Multi-factor requirement risk scoring
+│   ├── sandbox.py                     # Git worktree sandbox manager & promotion
+│   ├── stopping_engine.py             # Stopping conditions & gate synchronization
+│   └── verification_policy.py         # Dynamic policy compiler
+├── tests/                             # Comprehensive Test Suites (21 Suites, 467 Tests)
 ├── scripts/
 │   ├── install.py                     # Python-native atomic installer
 │   ├── install.ps1                    # PowerShell atomic installer
@@ -172,7 +175,7 @@ antigravity-strict-engineering-kernel/
 ├── .github/workflows/ci.yml           # GitHub Actions CI workflow
 ├── GEMINI.md                          # Antigravity strict engineering rules
 ├── hooks.json                         # Antigravity lifecycle hooks configuration
-├── pyproject.toml                     # Package specification (v1.0.0)
+├── pyproject.toml                     # Package specification (v1.0.1)
 └── run_tests.py                       # Top-level test runner
 ```
 
@@ -202,7 +205,7 @@ pip install .
 
 ## 🧪 Running Tests
 
-To run the complete suite of 462+ tests across all 21 test modules:
+To run the complete suite of 467 tests across all 21 test modules:
 
 ```bash
 python run_tests.py
@@ -218,7 +221,7 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ## 📊 Verification Metrics
 
-- **Total Test Cases:** 462+
+- **Total Test Cases:** 467
 - **Total Test Suites:** 21
 - **Pass Rate:** 100% (Zero Failures, Zero Errors)
 - **Zero External Dependencies:** Built entirely with Python standard library for maximum portability and zero supply-chain risk.

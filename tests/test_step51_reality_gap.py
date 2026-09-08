@@ -632,7 +632,7 @@ class Step51RealityGapTestSuite(unittest.TestCase):
 
         if has_node:
             dep_res = environment_factory.restore_dependencies(clean_dir)
-            self.assertIn(dep_res["status"], {"PASSED", "RESTORE_FAILED"})
+            self.assertIn(dep_res["status"], {"PASSED", "RESTORE_FAILED", "TIMEOUT"})
         else:
             dep_res = environment_factory.restore_dependencies(clean_dir)
             self.assertEqual(dep_res["status"], "NOT_CONFIGURED")

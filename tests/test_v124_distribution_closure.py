@@ -410,5 +410,29 @@ class SelfUpdatePackageParityTestSuite(unittest.TestCase):
         self.assertIn("Executing automatic rollback", msg)
 
 
+class DistributionModuleIntegrityTestSuite(unittest.TestCase):
+    """IMPORT-124-01: Verifies distribution module has all required runtime imports."""
+
+    def test_subprocess_import_available_in_distribution(self):
+        """IMPORT-124-01: distribution.py must import subprocess for update_python_package."""
+        import importlib, types
+        # Check subprocess is resolvable from distribution module's namespace
+        import strict_engineering.distribution as dist_mod
+        self.assertTrue(
+            hasattr(dist_mod, 'subprocess') or 'subprocess' in vars(dist_mod),
+            "distribution module missing 'subprocess' import — update_python_package will fail at runtime"
+        )
+
+    def test_update_python_package_callable_with_missing_pyproject(self):
+        """IMPORT-124-02: update_python_package returns graceful failure when pyproject.toml absent."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            fake_root = Path(td)
+            ok, msg, renamed = distribution.update_python_package(fake_root, "test_tx")
+            self.assertFalse(ok)
+            self.assertIn("pyproject.toml", msg)
+            self.assertIsNone(renamed)
+
+
 if __name__ == "__main__":
     unittest.main()

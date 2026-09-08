@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "antigravity-strict-engineering"
-version = "1.2.3"
+version = "1.2.4"
 description = "Deterministic, Risk-Adaptive and Adversarial Reliability Kernel for Google Antigravity"
 readme = "README.md"
 authors = [{ name = "Strict Engineering Contributors" }]

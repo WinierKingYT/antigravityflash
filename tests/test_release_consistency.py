@@ -16,19 +16,19 @@ SRC_DIR = REPO_ROOT / "src" / "strict_engineering"
 
 class ReleaseConsistencyTestSuite(unittest.TestCase):
     def test_version_alignment(self):
-        """Verify version is 1.2.3 across pyproject.toml, package __init__, installer, and README."""
+        """Verify version is 1.2.4 across pyproject.toml, package __init__, installer, and README."""
         # pyproject.toml
         pyproject_text = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         match = re.search(r'version\s*=\s*"([^"]+)"', pyproject_text)
         self.assertIsNotNone(match, "Could not find version in pyproject.toml")
         pyproject_ver = match.group(1)
-        self.assertEqual(pyproject_ver, "1.2.3")
+        self.assertEqual(pyproject_ver, "1.2.4")
 
         # __init__.py
         init_text = (SRC_DIR / "__init__.py").read_text(encoding="utf-8")
         match_init = re.search(r'__version__\s*=\s*"([^"]+)"', init_text)
         self.assertIsNotNone(match_init, "Could not find __version__ in __init__.py")
-        self.assertEqual(match_init.group(1), "1.2.3")
+        self.assertEqual(match_init.group(1), "1.2.4")
 
         # scripts/install.py
         install_text = (REPO_ROOT / "scripts" / "install.py").read_text(encoding="utf-8")
@@ -37,8 +37,8 @@ class ReleaseConsistencyTestSuite(unittest.TestCase):
 
         # README.md
         readme_text = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-        self.assertIn("V1.2.3", readme_text)
-        self.assertIn("badge/version-1.2.3-blue.svg", readme_text)
+        self.assertIn("V1.2.4", readme_text)
+        self.assertIn("badge/version-1.2.4-blue.svg", readme_text)
 
     def test_plugin_json_not_claimed_or_present(self):
         """Verify plugin.json does not exist on disk or in README project tree."""

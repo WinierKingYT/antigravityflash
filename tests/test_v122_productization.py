@@ -387,6 +387,7 @@ class V122ManifestAndRollbackTestSuite(unittest.TestCase):
             encoding="utf-8"
         )
 
+        distribution.save_global_config(distribution.load_global_config(gemini_dir=self.gemini_dir), gemini_dir=self.gemini_dir)
         self.manifest = distribution.generate_installation_manifest(
             modules_dir=self.cfg_dir,
             hooks_file=hooks_file,
@@ -461,7 +462,7 @@ class V122PluginAndReleaseTruthTestSuite(unittest.TestCase):
 
     def test_version_122_in_all_artifacts(self):
         """TR-REL-01..04: Version matches release version across all source files."""
-        self.assertIn(__version__, ("1.2.2", "1.2.3"))
+        self.assertIn(__version__, ("1.2.2", "1.2.3", "1.2.4"))
         pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn(f'version = "{__version__}"', pyproject)
 

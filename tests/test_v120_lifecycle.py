@@ -62,6 +62,7 @@ class LifecycleDistributionTestSuite(unittest.TestCase):
         agents_dir = self.fake_gemini / "config" / "agents"
         installer.install_agents(root_dir / "agents", agents_dir)
 
+        distribution.save_global_config(distribution.load_global_config(gemini_dir=self.fake_gemini), gemini_dir=self.fake_gemini)
         # Generate and save manifest
         manifest = distribution.generate_installation_manifest(
             modules_dir=cfg_dir,
@@ -70,9 +71,9 @@ class LifecycleDistributionTestSuite(unittest.TestCase):
             agents_dir=agents_dir,
             version=version,
             install_source=str(root_dir),
+            gemini_dir=self.fake_gemini,
         )
         distribution.save_installation_manifest(manifest, gemini_dir=self.fake_gemini)
-        distribution.save_global_config(distribution.load_global_config(gemini_dir=self.fake_gemini), gemini_dir=self.fake_gemini)
         return cfg_dir, hooks_file, gemini_md, agents_dir
 
     # -----------------------------------------------------------------------

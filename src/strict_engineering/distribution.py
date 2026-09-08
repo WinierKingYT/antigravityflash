@@ -32,7 +32,7 @@ except (ImportError, ValueError):
         import strict_engineering
         __version__ = strict_engineering.__version__
     except Exception:
-        __version__ = "1.2.3"
+        __version__ = "1.2.4"
     import installer  # type: ignore
     import observability  # type: ignore
 
@@ -174,17 +174,21 @@ def compute_gemini_managed_block_sha256(gemini_md_file: Path) -> Optional[str]:
         return None
 
 
-def compute_managed_agents_hashes(agents_dir: Path) -> Dict[str, Dict[str, str]]:
+def compute_managed_agents_hashes(
+    agents_dir: Path,
+    allowed_agents: Optional[Set[str]] = None,
+) -> Dict[str, Dict[str, str]]:
     """
     Computes deterministic SHA-256 hashes for all managed core agents (agent.md).
-    Custom agents outside MANAGED_CORE_AGENTS are completely excluded from ownership.
+    Custom agents outside allowed_agents / MANAGED_CORE_AGENTS are completely excluded from ownership.
     """
     p = Path(agents_dir).resolve()
     result: Dict[str, Dict[str, str]] = {}
     if not p.exists() or not p.is_dir():
         return result
+    target_agents = allowed_agents if allowed_agents is not None else MANAGED_CORE_AGENTS
     for d in sorted(p.iterdir()):
-        if d.is_dir() and d.name in MANAGED_CORE_AGENTS:
+        if d.is_dir() and d.name in target_agents:
             agent_files: Dict[str, str] = {}
             for f in sorted(d.iterdir()):
                 if f.is_file():
@@ -205,6 +209,7 @@ def generate_installation_manifest(
     install_source: Optional[str] = None,
     gemini_dir: Optional[Path] = None,
     allowed_modules: Optional[Set[str]] = None,
+    allowed_agents: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """Generate canonical manifest capturing precise hashes of all managed components."""
     modules_dir = Path(modules_dir).resolve()
@@ -219,7 +224,7 @@ def generate_installation_manifest(
 
     strict_hook_sha = compute_strict_hook_entry_sha256(hooks_file)
     gemini_block_sha = compute_gemini_managed_block_sha256(gemini_md_file)
-    agents_map = compute_managed_agents_hashes(agents_dir)
+    agents_map = compute_managed_agents_hashes(agents_dir, allowed_agents=allowed_agents)
 
     cfg_dir = get_config_dir(gemini_dir)
     config_file = cfg_dir / CONFIG_FILENAME
@@ -284,7 +289,10 @@ def load_installation_manifest(gemini_dir: Optional[Path] = None) -> Optional[Di
         return None
 
 
-def verify_manifest_integrity(gemini_dir: Optional[Path] = None) -> Tuple[bool, List[str]]:
+def verify_manifest_integrity(
+    gemini_dir: Optional[Path] = None,
+    skip_version_check: bool = False,
+) -> Tuple[bool, List[str]]:
     """
     Comprehensive, precise manifest integrity check:
     - Verifies all managed module file hashes match disk
@@ -292,7 +300,7 @@ def verify_manifest_integrity(gemini_dir: Optional[Path] = None) -> Tuple[bool, 
     - Verifies strict-engineering hook entry hash in hooks.json
     - Verifies managed block hash in GEMINI.md
     - Verifies global config.json exists and is valid
-    - Verifies package version matches installed manifest version
+    - Verifies package version matches installed manifest version (unless skip_version_check=True)
     Ignores all custom user agents, custom user hooks, and custom GEMINI text.
     """
     manifest = load_installation_manifest(gemini_dir)
@@ -368,14 +376,15 @@ def verify_manifest_integrity(gemini_dir: Optional[Path] = None) -> Tuple[bool, 
     # 6. Global config integrity and validity
     cfg_file = cfg_dir / CONFIG_FILENAME
     config_info = managed_files.get("config")
-    if isinstance(config_info, dict) and config_info.get("sha256"):
+    if not isinstance(config_info, dict) or not config_info.get("sha256"):
+        issues.append("Global configuration missing cryptographic binding in manifest (sha256 is null or empty)")
+    elif not cfg_file.exists():
+        issues.append(f"Global configuration missing from {cfg_file}")
+    else:
         expected_cfg_sha = config_info.get("sha256")
-        if not cfg_file.exists():
-            issues.append(f"Global configuration missing from {cfg_file}")
-        else:
-            actual_cfg_sha = compute_file_sha256(cfg_file)
-            if actual_cfg_sha != expected_cfg_sha:
-                issues.append("Global configuration modified in config.json (drift detected)")
+        actual_cfg_sha = compute_file_sha256(cfg_file)
+        if actual_cfg_sha != expected_cfg_sha:
+            issues.append("Global configuration modified in config.json (drift detected)")
 
     if cfg_file.exists():
         try:
@@ -383,13 +392,18 @@ def verify_manifest_integrity(gemini_dir: Optional[Path] = None) -> Tuple[bool, 
                 json.load(f)
         except Exception as e:
             issues.append(f"Global configuration corrupted in {cfg_file}: {e}")
+    else:
+        cfg_missing_msg = f"Global configuration missing from {cfg_file}"
+        if cfg_missing_msg not in issues:
+            issues.append(cfg_missing_msg)
 
     # 7. Package version vs manifest version
-    manifest_version = manifest.get("version")
-    if manifest_version and manifest_version != __version__:
-        issues.append(
-            f"Installed package version ({__version__}) does not match manifest version ({manifest_version})"
-        )
+    if not skip_version_check:
+        manifest_version = manifest.get("version")
+        if manifest_version and manifest_version != __version__:
+            issues.append(
+                f"Installed package version ({__version__}) does not match manifest version ({manifest_version})"
+            )
 
     return len(issues) == 0, issues
 
@@ -835,6 +849,67 @@ def validate_release_archive_content(
     return True, None, resolved_root
 
 
+def find_cli_executable() -> Optional[Path]:
+    """Find the path to the strict-engineering CLI executable in the current Python environment."""
+    candidates = [
+        Path(sys.executable).parent / ("strict-engineering.exe" if os.name == "nt" else "strict-engineering"),
+        Path(sys.prefix) / "Scripts" / "strict-engineering.exe" if os.name == "nt" else Path(sys.prefix) / "bin" / "strict-engineering",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    return None
+
+
+def update_python_package(pkg_root: Path, tx_id: str) -> Tuple[bool, str, Optional[Path]]:
+    """
+    Safely upgrades the installed python package using pip install --no-deps <pkg_root>.
+    On Windows, handles binary locking by temporarily renaming strict-engineering.exe
+    prior to running pip install.
+    Returns (success, message, renamed_exe_path).
+    """
+    if not (pkg_root / "pyproject.toml").exists():
+        return False, f"Package specification (pyproject.toml) not found in {pkg_root}", None
+
+    cli_exe = find_cli_executable()
+    renamed_exe: Optional[Path] = None
+
+    if os.name == "nt" and cli_exe and cli_exe.exists():
+        try:
+            renamed_exe = cli_exe.with_suffix(f".exe.{tx_id}.old")
+            os.rename(cli_exe, renamed_exe)
+        except Exception:
+            renamed_exe = None
+
+    cmd = [sys.executable, "-m", "pip", "install", "--no-deps", str(pkg_root)]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            err = res.stderr.strip() or res.stdout.strip()
+            if renamed_exe and renamed_exe.exists() and (not cli_exe or not cli_exe.exists()):
+                try:
+                    os.rename(renamed_exe, cli_exe)
+                except Exception:
+                    pass
+            return False, f"pip install failed (exit {res.returncode}): {err}", None
+
+        # Clean up renamed executable if possible
+        if renamed_exe and renamed_exe.exists():
+            try:
+                os.remove(renamed_exe)
+            except Exception:
+                pass
+
+        return True, "Python package updated successfully", renamed_exe
+    except Exception as e:
+        if renamed_exe and renamed_exe.exists() and (not cli_exe or not cli_exe.exists()):
+            try:
+                os.rename(renamed_exe, cli_exe)
+            except Exception:
+                pass
+        return False, f"Failed executing pip install: {e}", None
+
+
 def update_installation(
     source_dir: Optional[Path] = None,
     target_version: Optional[str] = None,
@@ -970,6 +1045,8 @@ def update_installation(
                 json.dump(current_manifest, bf, indent=2)
 
         config_file = cfg_dir / CONFIG_FILENAME
+        if not config_file.exists():
+            save_global_config(load_global_config(gemini_dir), gemini_dir=gemini_dir)
         if config_file.exists():
             shutil.copy2(config_file, backup_snapshot_dir / CONFIG_FILENAME)
 
@@ -984,9 +1061,23 @@ def update_installation(
         if agents_dir.exists():
             backup_agents_dir = backup_snapshot_dir / "agents"
             backup_agents_dir.mkdir(parents=True, exist_ok=True)
+            old_managed_agents = set()
+            if current_manifest and "managedFiles" in current_manifest:
+                old_managed_agents.update(current_manifest["managedFiles"].get("agents", {}).keys())
+            old_managed_agents.update(MANAGED_CORE_AGENTS)
             for d in agents_dir.iterdir():
-                if d.is_dir() and d.name in MANAGED_CORE_AGENTS:
+                if d.is_dir() and d.name in old_managed_agents:
                     shutil.copytree(d, backup_agents_dir / d.name, dirs_exist_ok=True)
+
+        # Record target update metadata in snapshot to facilitate clean rollback
+        staged_agent_names = []
+        if resolved_agents_dir and resolved_agents_dir.exists():
+            staged_agent_names = [d.name for d in resolved_agents_dir.iterdir() if d.is_dir()]
+        with open(backup_snapshot_dir / "target_update_metadata.json", "w", encoding="utf-8") as tum:
+            json.dump({
+                "target_version": new_version,
+                "staged_managed_agents": staged_agent_names,
+            }, tum, indent=2)
 
         # 4. COMMIT: Reconcile obsolete modules and copy staged modules into target config directory
         new_managed_modules = {f.name for f in staging_dir.glob("*.py")}
@@ -1003,7 +1094,8 @@ def update_installation(
         # Update core agent definitions from source if available
         if resolved_agents_dir and resolved_agents_dir.exists():
             old_managed_agents = set(current_manifest.get("managedFiles", {}).get("agents", {}).keys()) if current_manifest else set()
-            new_managed_agents = {d.name for d in resolved_agents_dir.iterdir() if d.is_dir() and d.name in MANAGED_CORE_AGENTS}
+            old_managed_agents.update(MANAGED_CORE_AGENTS)
+            new_managed_agents = {d.name for d in resolved_agents_dir.iterdir() if d.is_dir()}
             obsolete_agents = old_managed_agents - new_managed_agents
             for obs_agent in obsolete_agents:
                 shutil.rmtree(agents_dir / obs_agent, ignore_errors=True)
@@ -1052,7 +1144,24 @@ def update_installation(
         if not post_ok:
             raise RuntimeError("Post-check compilation verification failed on committed modules")
 
-        # 6. MANIFEST: Generate and save updated manifest
+        # 6. PACKAGE UPGRADE: Upgrade installed python package if pyproject.toml is available
+        pkg_root: Optional[Path] = None
+        if source_dir is not None:
+            src_p = Path(source_dir).resolve()
+            if (src_p / "pyproject.toml").exists():
+                pkg_root = src_p
+            elif (src_p.parent / "pyproject.toml").exists():
+                pkg_root = src_p.parent
+        elif 'resolved_root' in locals() and resolved_root and (resolved_root / "pyproject.toml").exists():
+            pkg_root = resolved_root
+
+        renamed_cli_exe: Optional[Path] = None
+        if pkg_root and (pkg_root / "pyproject.toml").exists():
+            pkg_ok, pkg_msg, renamed_cli_exe = update_python_package(pkg_root, tx_id)
+            if not pkg_ok:
+                raise RuntimeError(f"Package upgrade failed: {pkg_msg}")
+
+        # 7. MANIFEST: Generate and save updated manifest
         new_manifest = generate_installation_manifest(
             modules_dir=cfg_dir,
             hooks_file=hooks_file,
@@ -1063,9 +1172,18 @@ def update_installation(
             install_source=effective_source,
             gemini_dir=gemini_dir,
             allowed_modules=new_managed_modules,
+            allowed_agents=new_managed_agents if (resolved_agents_dir and resolved_agents_dir.exists()) else None,
         )
         new_manifest["status"] = "UPDATED"
         save_installation_manifest(new_manifest, gemini_dir=gemini_dir)
+
+        # 8. VERIFY: Ensure updated installation passes manifest integrity verification
+        # Package version parity is verified separately (update_python_package handles it).
+        # skip_version_check=True here because the package binary is updated by the OS
+        # and may be reflected only in a new process.
+        ok_verify, verify_issues = verify_manifest_integrity(gemini_dir=gemini_dir, skip_version_check=True)
+        if not ok_verify:
+            raise RuntimeError(f"Post-update manifest integrity verification failed: {', '.join(verify_issues)}")
 
         shutil.rmtree(staging_dir, ignore_errors=True)
         if temp_extract_parent:
@@ -1084,6 +1202,13 @@ def update_installation(
         rollback_ok = False
         if 'backup_snapshot_dir' in locals() and backup_snapshot_dir.exists():
             rollback_ok, rb_notes = rollback_from_snapshot(backup_snapshot_dir, cfg_dir, g)
+        if 'renamed_cli_exe' in locals() and renamed_cli_exe and renamed_cli_exe.exists():
+            cli_exe_target = find_cli_executable()
+            if not cli_exe_target or not cli_exe_target.exists():
+                try:
+                    os.rename(renamed_cli_exe, renamed_cli_exe.parent / ("strict-engineering.exe" if os.name == "nt" else "strict-engineering"))
+                except Exception:
+                    pass
         if 'staging_dir' in locals():
             shutil.rmtree(staging_dir, ignore_errors=True)
         if temp_extract_parent:
@@ -1159,16 +1284,42 @@ def rollback_from_snapshot(
         snapshot_agents_dir = snapshot_dir / "agents"
         target_agents_dir = gemini_dir / "config" / "agents"
         if snapshot_agents_dir.exists() and snapshot_agents_dir.is_dir():
-            snapshot_agent_names = {d.name for d in snapshot_agents_dir.iterdir() if d.is_dir()}
+            snapshot_manifest_file = snapshot_dir / MANIFEST_FILENAME
+            snapshot_managed_agents = set()
+            if snapshot_manifest_file.exists():
+                try:
+                    with open(snapshot_manifest_file, "r", encoding="utf-8") as smf:
+                        sm_data = json.load(smf)
+                        snapshot_managed_agents.update(sm_data.get("managedFiles", {}).get("agents", {}).keys())
+                except Exception:
+                    pass
+            snapshot_managed_agents.update(d.name for d in snapshot_agents_dir.iterdir() if d.is_dir())
+
+            # Read target update metadata if available to identify agents introduced by the failed update
+            staged_agents_set: Optional[Set[str]] = None
+            tum_file = snapshot_dir / "target_update_metadata.json"
+            if tum_file.exists():
+                try:
+                    with open(tum_file, "r", encoding="utf-8") as tf:
+                        tum_data = json.load(tf)
+                        staged_agents_set = set(tum_data.get("staged_managed_agents", []))
+                except Exception:
+                    pass
+
             if target_agents_dir.exists():
+                current_manifest = load_installation_manifest(gemini_dir)
+                current_managed_agents = set(current_manifest.get("managedFiles", {}).get("agents", {}).keys()) if current_manifest else set()
+                current_managed_agents.update(MANAGED_CORE_AGENTS)
+                if staged_agents_set is not None:
+                    current_managed_agents.update(staged_agents_set)
                 for d in list(target_agents_dir.iterdir()):
-                    if d.is_dir() and d.name in MANAGED_CORE_AGENTS and d.name not in snapshot_agent_names:
-                        shutil.rmtree(d)
+                    if d.is_dir() and d.name not in snapshot_managed_agents and d.name in current_managed_agents:
+                        shutil.rmtree(d, ignore_errors=True)
                         notes.append(f"Removed introduced managed agent: {d.name}")
 
             target_agents_dir.mkdir(parents=True, exist_ok=True)
             for d in snapshot_agents_dir.iterdir():
-                if d.is_dir() and d.name in MANAGED_CORE_AGENTS:
+                if d.is_dir():
                     shutil.copytree(d, target_agents_dir / d.name, dirs_exist_ok=True)
                     notes.append(f"Restored agent {d.name}")
 

@@ -33,7 +33,7 @@ except (ImportError, ValueError):
         import strict_engineering
         __version__ = strict_engineering.__version__
     except Exception:
-        __version__ = "1.2.3"
+        __version__ = "1.2.4"
 
 try:
     from . import kernel
@@ -246,7 +246,12 @@ def cmd_install(args: argparse.Namespace) -> int:
     else:
         print(f"[WARN] Source agents folder not found; skipping agent install")
 
-    # 5. Generate and save canonical installation manifest
+    # 5. Global configuration (must exist before manifest generation to cryptographically bind it)
+    config = distribution.load_global_config(gemini_dir=gemini_dir)
+    distribution.save_global_config(config, gemini_dir=gemini_dir)
+    print(f"[OK] Global configuration: verified at {target_config_dir / 'config.json'}")
+
+    # 6. Generate and save canonical installation manifest FROM FINAL INSTALLED STATE
     target_manifest = distribution.generate_installation_manifest(
         modules_dir=target_config_dir,
         hooks_file=hooks_file,
@@ -254,16 +259,19 @@ def cmd_install(args: argparse.Namespace) -> int:
         agents_dir=target_agents,
         version=__version__,
         install_source=str(repo_root),
+        gemini_dir=gemini_dir,
     )
     manifest_file = distribution.save_installation_manifest(target_manifest, gemini_dir=gemini_dir)
     print(f"[OK] Installation manifest: saved to {manifest_file} (tracking {len(target_manifest.get('managedFiles', {}).get('modules', {}))} modules)")
 
-    # 6. Global configuration
-    config = distribution.load_global_config(gemini_dir=gemini_dir)
-    distribution.save_global_config(config, gemini_dir=gemini_dir)
-    print(f"[OK] Global configuration: verified at {target_config_dir / 'config.json'}")
+    # 7. Post-install manifest integrity verification
+    ok_verify, verify_issues = distribution.verify_manifest_integrity(gemini_dir=gemini_dir)
+    if not ok_verify:
+        print(f"[FAIL] Post-install manifest integrity verification failed: {', '.join(verify_issues)}")
+        return EXIT_OPERATIONAL_FAILURE
+    print("[OK] Manifest integrity: verified cryptographically bound configuration and modules")
 
-    # 7. Observability log
+    # 8. Observability log
     observability.record_global_event(
         "INSTALL_COMPLETED",
         {"version": __version__, "modulesCount": copied_count},

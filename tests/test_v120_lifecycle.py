@@ -467,7 +467,16 @@ class LifecycleDistributionTestSuite(unittest.TestCase):
 
         # 1. update --check
         out1 = io.StringIO()
-        with patch("sys.stdout", out1):
+        with patch.object(
+            distribution,
+            "check_for_updates",
+            return_value=distribution.UpdateCheckResult(
+                status=distribution.UpdateCheckStatus.UP_TO_DATE,
+                current_version=__version__,
+                latest_version=__version__,
+                update_available=False,
+            ),
+        ), patch("sys.stdout", out1):
             code1 = cli.main(["update", "--check"])
         self.assertEqual(code1, cli.EXIT_SUCCESS)
         self.assertIn("Strict Engineering is up to date", out1.getvalue())

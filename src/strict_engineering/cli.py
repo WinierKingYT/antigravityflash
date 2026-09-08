@@ -1,5 +1,5 @@
 """
-Strict Engineering Kernel V1.2.2 - Operational CLI, Distribution & Project UX
+Strict Engineering Kernel V1.2.3 - Operational CLI, Distribution & Project UX
 Provides the unified command-line entrypoint `strict-engineering` for:
 - version
 - install
@@ -33,7 +33,7 @@ except (ImportError, ValueError):
         import strict_engineering
         __version__ = strict_engineering.__version__
     except Exception:
-        __version__ = "1.2.2"
+        __version__ = "1.2.3"
 
 try:
     from . import kernel

@@ -318,16 +318,29 @@ def inspect_completion_readiness(workspace: Union[str, Path]) -> Tuple[bool, Lis
 
     # Circuit Breaker Check across project conversations
     if runtime_safety is not None:
-        try:
-            cb_summary = runtime_safety.get_circuit_breaker_project_summary(ws)
-            if cb_summary.get("anyTripped", False):
-                unresolved_gates.append("Circuit breaker is TRIPPED across project conversations")
-            else:
-                cb_data = runtime_safety.load_circuit_breaker(ws)
-                if cb_data.get("tripped", False) or cb_data.get("circuitBreakerTripped", False):
-                    unresolved_gates.append("Circuit breaker is TRIPPED")
-        except Exception:
-            pass
+        cb_path = runtime_safety.get_circuit_breaker_path(ws) if hasattr(runtime_safety, "get_circuit_breaker_path") else kernel.get_harness_dir(ws) / "circuit-breaker.json"
+        cb_unreadable = False
+        if cb_path.exists():
+            try:
+                with open(cb_path, "r", encoding="utf-8") as f_cb:
+                    raw_cb = json.load(f_cb)
+                if not isinstance(raw_cb, dict):
+                    raise ValueError(f"circuit-breaker.json root must be a JSON object, got {type(raw_cb).__name__}")
+            except Exception as cb_err:
+                cb_unreadable = True
+                unresolved_gates.append(f"Circuit breaker state unreadable (CIRCUIT_BREAKER_STATE_UNREADABLE: {cb_err})")
+
+        if not cb_unreadable:
+            try:
+                cb_summary = runtime_safety.get_circuit_breaker_project_summary(ws)
+                if cb_summary.get("anyTripped", False):
+                    unresolved_gates.append("Circuit breaker is TRIPPED across project conversations")
+                else:
+                    cb_data = runtime_safety.load_circuit_breaker(ws)
+                    if cb_data.get("tripped", False) or cb_data.get("circuitBreakerTripped", False):
+                        unresolved_gates.append("Circuit breaker is TRIPPED")
+            except Exception as cb_err:
+                unresolved_gates.append(f"Circuit breaker state unreadable (CIRCUIT_BREAKER_STATE_UNREADABLE: {cb_err})")
 
     # 1. Original Request Integrity Check
     if not kernel.verify_original_intent_integrity(ws):
@@ -365,11 +378,13 @@ def inspect_completion_readiness(workspace: Union[str, Path]) -> Tuple[bool, Lis
     # 5. Detect Stale Requirements & Check Freshness (Pure Inspection)
     if hasattr(kernel, "detect_stale_requirements"):
         stale_ids = kernel.detect_stale_requirements(ws)
+        if stale_ids:
+            unresolved_gates.append(
+                f"{len(stale_ids)} requirement(s) would become STALE due to workspace modifications post-verification: {', '.join(stale_ids)}"
+            )
     else:
-        stale_ids = kernel.check_and_invalidate_stale(ws)
-    if stale_ids:
         unresolved_gates.append(
-            f"{len(stale_ids)} requirement(s) would become STALE due to workspace modifications post-verification: {', '.join(stale_ids)}"
+            "Pure stale requirements inspection is unavailable (PURE_STALE_INSPECTION_UNAVAILABLE)"
         )
 
     # 6. Requirement Ledger Audit & Execution-Backed Pass Verification
@@ -680,13 +695,15 @@ def inspect_completion_readiness(workspace: Union[str, Path]) -> Tuple[bool, Lis
             try:
                 if hasattr(decision_coverage, "compute_decision_coverage"):
                     dec_cov = decision_coverage.compute_decision_coverage(ws)
+                    orphans = dec_cov.get("orphanedRequirements", [])
+                    if orphans:
+                        unresolved_gates.append(f"Orphaned requirements detected without decision trace: {', '.join(orphans)}")
                 else:
-                    dec_cov = decision_coverage.sync_decision_coverage(ws)
-                orphans = dec_cov.get("orphanedRequirements", [])
-                if orphans:
-                    unresolved_gates.append(f"Orphaned requirements detected without decision trace: {', '.join(orphans)}")
-            except Exception:
-                pass
+                    unresolved_gates.append(
+                        "Pure decision coverage inspection is unavailable (PURE_DECISION_COVERAGE_UNAVAILABLE)"
+                    )
+            except Exception as e:
+                unresolved_gates.append(f"Decision coverage inspection failed: {e}")
 
     # 12. Unresolved CRITICAL/HIGH Concerns check
     concerns_file = kernel.get_harness_dir(ws) / "concerns.json"

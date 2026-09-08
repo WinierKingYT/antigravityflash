@@ -42,7 +42,7 @@ class LifecycleDistributionTestSuite(unittest.TestCase):
         self.cli_patcher.stop()
         shutil.rmtree(self.temp_dir, ignore_errors=True)
 
-    def _setup_installed_environment(self, version="1.2.0"):
+    def _setup_installed_environment(self, version=__version__):
         """Helper to set up a populated mock installation."""
         cfg_dir = self.fake_gemini / "config" / "strict-engineering"
         cfg_dir.mkdir(parents=True, exist_ok=True)
@@ -83,7 +83,7 @@ class LifecycleDistributionTestSuite(unittest.TestCase):
         cfg_dir, hooks_file, gemini_md, agents_dir = self._setup_installed_environment()
         manifest = distribution.load_installation_manifest(gemini_dir=self.fake_gemini)
         self.assertIsNotNone(manifest)
-        self.assertEqual(manifest.get("version"), "1.2.0")
+        self.assertEqual(manifest.get("version"), __version__)
         self.assertEqual(manifest.get("schemaVersion"), "1.2.0")
 
         mods = manifest.get("managedFiles", {}).get("modules", {})
@@ -463,7 +463,7 @@ class LifecycleDistributionTestSuite(unittest.TestCase):
     # -----------------------------------------------------------------------
     def test_lc_18_cli_lifecycle_commands_integration(self):
         """LC-18: CLI subcommands update --check, rollback --list, rollback --dry-run, uninstall --dry-run, doctor --verbose."""
-        self._setup_installed_environment("1.2.0")
+        self._setup_installed_environment(__version__)
 
         # 1. update --check
         out1 = io.StringIO()

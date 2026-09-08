@@ -17,10 +17,11 @@ import datetime
 import compileall
 import zipfile
 import tarfile
+import re
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 try:
     from . import __version__
@@ -31,7 +32,7 @@ except (ImportError, ValueError):
         import strict_engineering
         __version__ = strict_engineering.__version__
     except Exception:
-        __version__ = "1.2.2"
+        __version__ = "1.2.3"
     import installer  # type: ignore
     import observability  # type: ignore
 
@@ -203,12 +204,15 @@ def generate_installation_manifest(
     previous_version: Optional[str] = None,
     install_source: Optional[str] = None,
     gemini_dir: Optional[Path] = None,
+    allowed_modules: Optional[Set[str]] = None,
 ) -> Dict[str, Any]:
     """Generate canonical manifest capturing precise hashes of all managed components."""
     modules_dir = Path(modules_dir).resolve()
     modules_map: Dict[str, str] = {}
     if modules_dir.exists():
         for f in sorted(modules_dir.glob("*.py")):
+            if allowed_modules is not None and f.name not in allowed_modules:
+                continue
             sha = compute_file_sha256(f)
             if sha:
                 modules_map[f.name] = sha
@@ -361,14 +365,31 @@ def verify_manifest_integrity(gemini_dir: Optional[Path] = None) -> Tuple[bool, 
         elif actual_gemini_sha != expected_gemini_sha:
             issues.append("Strict Engineering managed block modified in GEMINI.md (drift detected)")
 
-    # 6. Global config validity
+    # 6. Global config integrity and validity
     cfg_file = cfg_dir / CONFIG_FILENAME
+    config_info = managed_files.get("config")
+    if isinstance(config_info, dict) and config_info.get("sha256"):
+        expected_cfg_sha = config_info.get("sha256")
+        if not cfg_file.exists():
+            issues.append(f"Global configuration missing from {cfg_file}")
+        else:
+            actual_cfg_sha = compute_file_sha256(cfg_file)
+            if actual_cfg_sha != expected_cfg_sha:
+                issues.append("Global configuration modified in config.json (drift detected)")
+
     if cfg_file.exists():
         try:
             with open(cfg_file, "r", encoding="utf-8") as f:
                 json.load(f)
         except Exception as e:
             issues.append(f"Global configuration corrupted in {cfg_file}: {e}")
+
+    # 7. Package version vs manifest version
+    manifest_version = manifest.get("version")
+    if manifest_version and manifest_version != __version__:
+        issues.append(
+            f"Installed package version ({__version__}) does not match manifest version ({manifest_version})"
+        )
 
     return len(issues) == 0, issues
 
@@ -399,21 +420,28 @@ class UpdateCheckResult:
         yield self.latest_version if self.latest_version is not None else self.current_version
 
 
-def parse_version_tuple(v_str: str) -> Tuple[int, ...]:
-    """Parse version string like '1.2.0' or 'v1.2.1' into integer tuple for comparison."""
-    clean = str(v_str).strip().lstrip("vV")
-    parts = []
-    for part in clean.split("."):
-        try:
-            parts.append(int(part))
-        except ValueError:
-            import re
-            m = re.match(r"^(\d+)", part)
-            if m:
-                parts.append(int(m.group(1)))
-            else:
-                parts.append(0)
-    return tuple(parts) if parts else (0, 0, 0)
+SEMVER_REGEX = re.compile(r"^v?(\d+)\.(\d+)\.(\d+)$")
+
+
+def is_valid_semver(v_str: Any) -> bool:
+    """Check whether a version string strictly matches canonical SemVer (vMAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH)."""
+    if not isinstance(v_str, str):
+        return False
+    return bool(SEMVER_REGEX.match(v_str.strip()))
+
+
+def parse_version_tuple(v_str: str) -> Tuple[int, int, int]:
+    """
+    Strictly parse canonical SemVer string like '1.2.0' or 'v1.2.1' into integer tuple (major, minor, patch).
+    Raises ValueError on malformed, non-canonical, or non-SemVer version strings.
+    """
+    if not isinstance(v_str, str):
+        raise ValueError(f"Version must be a string, got {type(v_str).__name__}")
+    clean = str(v_str).strip()
+    m = SEMVER_REGEX.match(clean)
+    if not m:
+        raise ValueError(f"Invalid canonical SemVer format: '{v_str}' (expected vMAJOR.MINOR.PATCH or MAJOR.MINOR.PATCH)")
+    return int(m.group(1)), int(m.group(2)), int(m.group(3))
 
 
 def check_for_updates(
@@ -457,43 +485,51 @@ def check_for_updates(
                                 source=clean_source,
                             )
                         tag_name = payload.get("tag_name", "")
-                        if tag_name:
-                            latest_version = tag_name.lstrip("vV")
-                            download_url = payload.get("zipball_url")
-                            for asset in payload.get("assets", []):
-                                aname = asset.get("name", "").lower()
-                                if aname.endswith(".zip") or aname.endswith(".tar.gz"):
-                                    download_url = asset.get("browser_download_url")
-                                    break
-                            html_url = payload.get("html_url")
-
-                            if parse_version_tuple(latest_version) > parse_version_tuple(current_version):
-                                return UpdateCheckResult(
-                                    status=UpdateCheckStatus.UPDATE_AVAILABLE,
-                                    current_version=current_version,
-                                    latest_version=latest_version,
-                                    update_available=True,
-                                    download_url=download_url,
-                                    release_notes_url=html_url,
-                                    source=clean_source,
-                                )
-                            else:
-                                return UpdateCheckResult(
-                                    status=UpdateCheckStatus.UP_TO_DATE,
-                                    current_version=current_version,
-                                    latest_version=latest_version,
-                                    update_available=False,
-                                    download_url=download_url,
-                                    release_notes_url=html_url,
-                                    source=clean_source,
-                                )
-                        else:
+                        if not tag_name:
                             return UpdateCheckResult(
                                 status=UpdateCheckStatus.CHECK_FAILED,
                                 current_version=current_version,
                                 latest_version=None,
                                 update_available=False,
                                 error="GitHub release missing tag_name",
+                                source=clean_source,
+                            )
+                        if not is_valid_semver(tag_name):
+                            return UpdateCheckResult(
+                                status=UpdateCheckStatus.CHECK_FAILED,
+                                current_version=current_version,
+                                latest_version=None,
+                                update_available=False,
+                                error=f"INVALID_REMOTE_METADATA: malformed release tag '{tag_name}' (expected canonical SemVer)",
+                                source=clean_source,
+                            )
+                        latest_version = tag_name.lstrip("vV")
+                        download_url = payload.get("zipball_url")
+                        for asset in payload.get("assets", []):
+                            aname = asset.get("name", "").lower()
+                            if aname.endswith(".zip") or aname.endswith(".tar.gz"):
+                                download_url = asset.get("browser_download_url")
+                                break
+                        html_url = payload.get("html_url")
+
+                        if parse_version_tuple(latest_version) > parse_version_tuple(current_version):
+                            return UpdateCheckResult(
+                                status=UpdateCheckStatus.UPDATE_AVAILABLE,
+                                current_version=current_version,
+                                latest_version=latest_version,
+                                update_available=True,
+                                download_url=download_url,
+                                release_notes_url=html_url,
+                                source=clean_source,
+                            )
+                        else:
+                            return UpdateCheckResult(
+                                status=UpdateCheckStatus.UP_TO_DATE,
+                                current_version=current_version,
+                                latest_version=latest_version,
+                                update_available=False,
+                                download_url=download_url,
+                                release_notes_url=html_url,
                                 source=clean_source,
                             )
                     else:
@@ -508,10 +544,11 @@ def check_for_updates(
             except urllib.error.HTTPError as he:
                 if he.code == 404:
                     return UpdateCheckResult(
-                        status=UpdateCheckStatus.UP_TO_DATE,
+                        status=UpdateCheckStatus.CHECK_FAILED,
                         current_version=current_version,
-                        latest_version=current_version,
+                        latest_version=None,
                         update_available=False,
+                        error=f"GitHub release not found (HTTP 404): {clean_source}",
                         source=clean_source,
                     )
                 return UpdateCheckResult(
@@ -550,9 +587,27 @@ def check_for_updates(
                 if resp.status == 200:
                     payload = json.loads(resp.read().decode("utf-8"))
                     latest_ver_raw = payload.get("version") or payload.get("tag_name", "")
-                    latest_version = latest_ver_raw.lstrip("vV") if latest_ver_raw else ""
+                    if not latest_ver_raw:
+                        return UpdateCheckResult(
+                            status=UpdateCheckStatus.CHECK_FAILED,
+                            current_version=current_version,
+                            latest_version=None,
+                            update_available=False,
+                            error="Remote release response missing version or tag_name",
+                            source=clean_source,
+                        )
+                    if not is_valid_semver(latest_ver_raw):
+                        return UpdateCheckResult(
+                            status=UpdateCheckStatus.CHECK_FAILED,
+                            current_version=current_version,
+                            latest_version=None,
+                            update_available=False,
+                            error=f"INVALID_REMOTE_METADATA: malformed remote version '{latest_ver_raw}' (expected canonical SemVer)",
+                            source=clean_source,
+                        )
+                    latest_version = latest_ver_raw.lstrip("vV")
                     download_url = payload.get("download_url") or payload.get("zipball_url")
-                    if latest_version and parse_version_tuple(latest_version) > parse_version_tuple(current_version):
+                    if parse_version_tuple(latest_version) > parse_version_tuple(current_version):
                         return UpdateCheckResult(
                             status=UpdateCheckStatus.UPDATE_AVAILABLE,
                             current_version=current_version,
@@ -565,7 +620,7 @@ def check_for_updates(
                         return UpdateCheckResult(
                             status=UpdateCheckStatus.UP_TO_DATE,
                             current_version=current_version,
-                            latest_version=latest_version or current_version,
+                            latest_version=latest_version,
                             update_available=False,
                             download_url=download_url,
                             source=clean_source,
@@ -579,6 +634,15 @@ def check_for_updates(
                         error=f"HTTP status {resp.status}",
                         source=clean_source,
                     )
+        except urllib.error.HTTPError as he:
+            return UpdateCheckResult(
+                status=UpdateCheckStatus.CHECK_FAILED,
+                current_version=current_version,
+                latest_version=None,
+                update_available=False,
+                error=f"HTTP {he.code}: {he.reason}",
+                source=clean_source,
+            )
         except Exception as e:
             return UpdateCheckResult(
                 status=UpdateCheckStatus.CHECK_FAILED,
@@ -607,7 +671,17 @@ def check_for_updates(
             try:
                 m = re.search(r'__version__\s*=\s*"([^"]+)"', init_file.read_text(encoding="utf-8"))
                 if m:
-                    latest_version = m.group(1).lstrip("vV")
+                    latest_ver_raw = m.group(1)
+                    if not is_valid_semver(latest_ver_raw):
+                        return UpdateCheckResult(
+                            status=UpdateCheckStatus.CHECK_FAILED,
+                            current_version=current_version,
+                            latest_version=None,
+                            update_available=False,
+                            error=f"INVALID_REMOTE_METADATA: malformed local version '{latest_ver_raw}'",
+                            source=clean_source,
+                        )
+                    latest_version = latest_ver_raw.lstrip("vV")
                     if parse_version_tuple(latest_version) > parse_version_tuple(current_version):
                         return UpdateCheckResult(
                             status=UpdateCheckStatus.UPDATE_AVAILABLE,
@@ -664,11 +738,14 @@ def safe_extract_archive(archive_path: Path, target_dir: Path) -> List[Path]:
     if is_zip:
         with zipfile.ZipFile(archive_path, "r") as zf:
             for member in zf.infolist():
-                dest_path = (target_dir / member.filename).resolve()
+                fname = member.filename
+                if fname.startswith("/") or fname.startswith("\\") or (len(fname) > 1 and fname[1] == ":"):
+                    raise ValueError(f"Zip slip path traversal detected: {fname}")
+                dest_path = (target_dir / fname).resolve()
                 try:
                     dest_path.relative_to(target_dir)
                 except ValueError:
-                    raise ValueError(f"Zip slip path traversal detected: {member.filename}")
+                    raise ValueError(f"Zip slip path traversal detected: {fname}")
             for member in zf.infolist():
                 dest_path = (target_dir / member.filename).resolve()
                 zf.extract(member, target_dir)
@@ -676,14 +753,24 @@ def safe_extract_archive(archive_path: Path, target_dir: Path) -> List[Path]:
     elif is_tar:
         with tarfile.open(archive_path, "r:*") as tf:
             for member in tf.getmembers():
-                dest_path = (target_dir / member.name).resolve()
+                if member.issym():
+                    raise ValueError(f"Tar symlink rejected: {member.name}")
+                if member.islnk():
+                    raise ValueError(f"Tar hardlink rejected: {member.name}")
+                mname = member.name
+                if mname.startswith("/") or mname.startswith("\\") or (len(mname) > 1 and mname[1] == ":"):
+                    raise ValueError(f"Tar slip path traversal detected: {mname}")
+                dest_path = (target_dir / mname).resolve()
                 try:
                     dest_path.relative_to(target_dir)
                 except ValueError:
-                    raise ValueError(f"Tar slip path traversal detected: {member.name}")
+                    raise ValueError(f"Tar slip path traversal detected: {mname}")
             for member in tf.getmembers():
                 dest_path = (target_dir / member.name).resolve()
-                tf.extract(member, target_dir)
+                if hasattr(tarfile, "data_filter"):
+                    tf.extract(member, target_dir, filter="data")
+                else:
+                    tf.extract(member, target_dir)
                 extracted.append(dest_path)
 
     return extracted
@@ -882,6 +969,10 @@ def update_installation(
             with open(backup_snapshot_dir / MANIFEST_FILENAME, "w", encoding="utf-8") as bf:
                 json.dump(current_manifest, bf, indent=2)
 
+        config_file = cfg_dir / CONFIG_FILENAME
+        if config_file.exists():
+            shutil.copy2(config_file, backup_snapshot_dir / CONFIG_FILENAME)
+
         hooks_file = g / "config" / "hooks.json"
         gemini_md_file = g / "GEMINI.md"
         agents_dir = g / "config" / "agents"
@@ -897,12 +988,26 @@ def update_installation(
                 if d.is_dir() and d.name in MANAGED_CORE_AGENTS:
                     shutil.copytree(d, backup_agents_dir / d.name, dirs_exist_ok=True)
 
-        # 4. COMMIT: Copy staged modules into target config directory
+        # 4. COMMIT: Reconcile obsolete modules and copy staged modules into target config directory
+        new_managed_modules = {f.name for f in staging_dir.glob("*.py")}
+        old_managed_modules = set(current_manifest.get("managedFiles", {}).get("modules", {}).keys()) if current_manifest else set()
+        obsolete_modules = old_managed_modules - new_managed_modules
+        for obs_mod in obsolete_modules:
+            obs_p = cfg_dir / obs_mod
+            if obs_p.exists():
+                obs_p.unlink()
+
         for f in staging_dir.glob("*.py"):
             shutil.copy2(f, cfg_dir / f.name)
 
         # Update core agent definitions from source if available
         if resolved_agents_dir and resolved_agents_dir.exists():
+            old_managed_agents = set(current_manifest.get("managedFiles", {}).get("agents", {}).keys()) if current_manifest else set()
+            new_managed_agents = {d.name for d in resolved_agents_dir.iterdir() if d.is_dir() and d.name in MANAGED_CORE_AGENTS}
+            obsolete_agents = old_managed_agents - new_managed_agents
+            for obs_agent in obsolete_agents:
+                shutil.rmtree(agents_dir / obs_agent, ignore_errors=True)
+
             installer.install_agents(resolved_agents_dir, agents_dir)
 
         # Merge hooks and GEMINI managed block
@@ -956,6 +1061,8 @@ def update_installation(
             version=new_version,
             previous_version=current_version,
             install_source=effective_source,
+            gemini_dir=gemini_dir,
+            allowed_modules=new_managed_modules,
         )
         new_manifest["status"] = "UPDATED"
         save_installation_manifest(new_manifest, gemini_dir=gemini_dir)
@@ -1024,6 +1131,17 @@ def rollback_from_snapshot(
         if (snapshot_dir / MANIFEST_FILENAME).exists():
             shutil.copy2(snapshot_dir / MANIFEST_FILENAME, target_cfg_dir / MANIFEST_FILENAME)
             notes.append("Restored manifest.json")
+        elif (target_cfg_dir / MANIFEST_FILENAME).exists():
+            (target_cfg_dir / MANIFEST_FILENAME).unlink()
+            notes.append("Removed introduced manifest.json")
+
+        # 3. Restore config.json
+        if (snapshot_dir / CONFIG_FILENAME).exists():
+            shutil.copy2(snapshot_dir / CONFIG_FILENAME, target_cfg_dir / CONFIG_FILENAME)
+            notes.append("Restored config.json")
+        elif (target_cfg_dir / CONFIG_FILENAME).exists():
+            (target_cfg_dir / CONFIG_FILENAME).unlink()
+            notes.append("Removed introduced config.json")
 
         # 3. Restore hooks
         if (snapshot_dir / "hooks.json").exists():

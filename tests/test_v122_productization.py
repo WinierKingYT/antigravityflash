@@ -392,7 +392,8 @@ class V122ManifestAndRollbackTestSuite(unittest.TestCase):
             hooks_file=hooks_file,
             gemini_md_file=gemini_md,
             agents_dir=self.agents_dir,
-            version="1.2.2",
+            version=__version__,
+            gemini_dir=self.gemini_dir,
         )
         distribution.save_installation_manifest(self.manifest, gemini_dir=self.gemini_dir)
 
@@ -459,10 +460,10 @@ class V122PluginAndReleaseTruthTestSuite(unittest.TestCase):
         self.assertIn("Official Antigravity plugin packaging is deferred", readme)
 
     def test_version_122_in_all_artifacts(self):
-        """TR-REL-01..04: Version 1.2.2 across all source files."""
-        self.assertEqual(__version__, "1.2.2")
+        """TR-REL-01..04: Version matches release version across all source files."""
+        self.assertIn(__version__, ("1.2.2", "1.2.3"))
         pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
-        self.assertIn('version = "1.2.2"', pyproject)
+        self.assertIn(f'version = "{__version__}"', pyproject)
 
 
 if __name__ == "__main__":

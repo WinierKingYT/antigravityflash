@@ -1,10 +1,10 @@
-# Antigravity Strict Engineering Kernel (V1.2.2)
+# Antigravity Strict Engineering Kernel (V1.2.3)
 
 A deterministic, risk-adaptive, reality-hardened, and adversarial reliability kernel for Google Antigravity on Windows.
 
 [![CI](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml/badge.svg)](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-1.2.2-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-546%20passed-brightgreen.svg)](run_tests.py)
+[![Version](https://img.shields.io/badge/version-1.2.3-blue.svg)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-561%20passed-brightgreen.svg)](run_tests.py)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ---
@@ -179,7 +179,7 @@ antigravity-strict-engineering-kernel/
 ├── .github/workflows/ci.yml           # GitHub Actions CI workflow
 ├── GEMINI.md                          # Antigravity strict engineering rules
 ├── hooks.json                         # Antigravity lifecycle hooks configuration
-├── pyproject.toml                     # Package specification (v1.2.2)
+├── pyproject.toml                     # Package specification (v1.2.3)
 └── run_tests.py                       # Top-level test runner
 ```
 
@@ -189,6 +189,11 @@ antigravity-strict-engineering-kernel/
 ---
 
 ## ⚡ Installation & Quick Start
+
+> [!IMPORTANT]
+> **Self-Update & Historical Version Limitations**:
+> - Automatic live self-update (`strict-engineering update`) requires V1.2.2 or newer as the base installation.
+> - Historical V1.2.1 installations lack canonical distribution metadata and require a one-time manual bootstrap (`python scripts/install.py` or `pip install .`) to upgrade to V1.2.2+.
 
 ### 1. Install Package & Configure Hooks
 
@@ -249,7 +254,7 @@ strict-engineering uninstall
 
 ## 🧪 Running Tests
 
-To run the complete suite of 527 tests across all 25 test modules:
+To run the complete suite of 561 tests across all 27 test modules:
 
 ```bash
 python run_tests.py
@@ -265,8 +270,8 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ## 📊 Verification Metrics
 
-- **Total Test Cases:** 527
-- **Total Test Suites:** 25
+- **Total Test Cases:** 561
+- **Total Test Suites:** 27
 - **Pass Rate:** 100% (Zero Failures, Zero Errors)
 - **Zero External Dependencies:** Built entirely with Python standard library for maximum portability and zero supply-chain risk.
 

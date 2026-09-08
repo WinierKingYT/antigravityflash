@@ -156,7 +156,8 @@ class TestV121Productization(unittest.TestCase):
         self.assertEqual(cb["tripped"], cb["circuitBreakerTripped"])
         self.assertEqual(cb["automaticContinueCount"], cb["consecutiveContinuesWithoutProgress"])
 
-    def test_safe_init_archives_existing_harness_on_force(self):
+
+    def test_init_blocks_on_existing_harness(self):
         kernel.initialize_harness(self.workspace, original_intent="Initial intent v1")
         harness_dir = self.workspace / ".agent-harness"
 
@@ -165,26 +166,17 @@ class TestV121Productization(unittest.TestCase):
 
         args = MagicMock()
         args.workspace = str(self.workspace)
-        args.force = True
         args.intent = "Overwriting intent v2"
         args.await_intent = False
 
         exit_code = cli.cmd_init(args)
-        self.assertEqual(exit_code, 0)
-
-        archive_root = harness_dir / ".archive"
-        self.assertTrue(archive_root.exists())
-        archived_runs = list(archive_root.iterdir())
-        self.assertGreaterEqual(len(archived_runs), 1)
-
-        latest_archive = sorted(archived_runs, key=lambda x: x.name)[-1]
-        archived_marker = latest_archive / "custom_evidence.log"
-        self.assertTrue(archived_marker.exists())
-        self.assertEqual(archived_marker.read_text(encoding="utf-8"), "critical execution proof")
+        self.assertEqual(exit_code, 3)
+        self.assertEqual(marker.read_text(encoding="utf-8"), "critical execution proof")
 
         state = kernel.load_state(self.workspace)
-        expected_sha = hashlib.sha256("Overwriting intent v2".encode("utf-8")).hexdigest()
-        self.assertEqual(state.get("originalRequestSha256"), expected_sha)
+        # Verify state was NOT updated to intent v2
+        expected_sha_v1 = hashlib.sha256("Initial intent v1".encode("utf-8")).hexdigest()
+        self.assertEqual(state.get("originalRequestSha256"), expected_sha_v1)
 
     def test_version_parsing_and_local_update_check(self):
         self.assertGreater(

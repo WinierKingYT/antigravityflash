@@ -410,11 +410,11 @@ def build_decision_coverage_matrix(
     }
 
 
-def sync_decision_coverage(workspace_dir: Union[str, Path]) -> Dict[str, Any]:
+def compute_decision_coverage(workspace_dir: Union[str, Path]) -> Dict[str, Any]:
     """
-    Load workspace frame, concerns, decisions, and requirements,
-    build coverage matrix, save to .agent-harness/decision-coverage.json,
-    and return coverage dictionary.
+    Pure, read-only calculation of workspace decision coverage matrix.
+    Loads frame, concerns, decisions, and requirements, and builds coverage
+    matrix WITHOUT writing to .agent-harness/decision-coverage.json.
     """
     ws = Path(workspace_dir).resolve()
 
@@ -470,12 +470,20 @@ def sync_decision_coverage(workspace_dir: Union[str, Path]) -> Dict[str, Any]:
             except Exception:
                 requirements_list = []
 
-    cov_data = build_decision_coverage_matrix(
+    return build_decision_coverage_matrix(
         frame=frame_data,
         concerns=concerns_list,
         decisions=decisions_list,
         requirements=requirements_list,
     )
 
+
+def sync_decision_coverage(workspace_dir: Union[str, Path]) -> Dict[str, Any]:
+    """
+    Authorized lifecycle synchronization:
+    computes coverage matrix and persists it to .agent-harness/decision-coverage.json.
+    """
+    ws = Path(workspace_dir).resolve()
+    cov_data = compute_decision_coverage(ws)
     save_decision_coverage(ws, cov_data)
     return cov_data

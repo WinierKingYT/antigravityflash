@@ -706,10 +706,12 @@ def is_execution_backed_pass(
     return True, "Requirement has verified, fresh, execution-backed PASS evidence"
 
 
-def check_and_invalidate_stale(workspace_dir: Path) -> List[str]:
+def detect_stale_requirements(workspace_dir: Union[str, Path]) -> List[str]:
     """
-    Check all PASS requirements and invalidate to STALE if affected files have been modified.
-    Returns list of invalidated requirement IDs.
+    Pure, read-only detection of requirements whose verified fingerprints
+    no longer match current workspace files.
+    Does NOT mutate requirements.json, record change events, or modify state.
+    Returns list of requirement IDs that are stale or would become stale.
     """
     workspace_path = Path(workspace_dir).resolve()
     reqs = load_requirements(workspace_path)
@@ -727,13 +729,13 @@ def check_and_invalidate_stale(workspace_dir: Path) -> List[str]:
         except Exception:
             pass
 
-    invalidated: List[str] = []
+    stale_ids: List[str] = []
     for req in reqs:
         if req.get("status") == "PASS":
             rid = req.get("id")
             last_fp = req.get("lastVerifiedFingerprint")
             affected = req.get("affectedPaths", []) or dep_map.get(rid, [])
-            
+
             is_stale = False
             if affected:
                 curr_sub = fingerprint.compute_path_subset_fingerprint(file_hashes, affected)
@@ -747,10 +749,30 @@ def check_and_invalidate_stale(workspace_dir: Path) -> List[str]:
                 # If no last_fp recorded, mark stale on workspace modification
                 is_stale = True
 
-            if is_stale:
-                req["status"] = "STALE"
-                req["updatedAt"] = utc_now_iso()
-                invalidated.append(rid)
+            if is_stale and rid:
+                stale_ids.append(rid)
+
+    return stale_ids
+
+
+def check_and_invalidate_stale(workspace_dir: Path) -> List[str]:
+    """
+    Check all PASS requirements and invalidate to STALE if affected files have been modified.
+    Authorized lifecycle mutation: updates requirements.json and records change event.
+    Returns list of invalidated requirement IDs.
+    """
+    workspace_path = Path(workspace_dir).resolve()
+    stale_ids = detect_stale_requirements(workspace_path)
+    if not stale_ids:
+        return []
+
+    reqs = load_requirements(workspace_path)
+    invalidated: List[str] = []
+    for req in reqs:
+        if req.get("id") in stale_ids and req.get("status") == "PASS":
+            req["status"] = "STALE"
+            req["updatedAt"] = utc_now_iso()
+            invalidated.append(req["id"])
 
     if invalidated:
         save_requirements(workspace_path, reqs)

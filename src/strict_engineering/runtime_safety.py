@@ -295,8 +295,9 @@ def _normalize_cb_entry(entry: Dict[str, Any], default_max: int = DEFAULT_MAX_AU
     ts = entry.get("lastContinueTimestamp")
     tc = entry.get("lastTerminationClass")
     reason = entry.get("tripReason")
+    cid = entry.get("conversationId")
 
-    return {
+    res = {
         "automaticContinueCount": count,
         "consecutiveContinuesWithoutProgress": count,
         "lastStateFingerprint": fp,
@@ -306,6 +307,52 @@ def _normalize_cb_entry(entry: Dict[str, Any], default_max: int = DEFAULT_MAX_AU
         "circuitBreakerTripped": tripped,
         "tripReason": reason,
         "maxContinues": max_c,
+    }
+    if cid:
+        res["conversationId"] = cid
+    return res
+
+
+def get_circuit_breaker_project_summary(workspace_dir: Union[str, Path]) -> Dict[str, Any]:
+    """
+    Produce truthful project-level circuit breaker summary across all known conversations.
+    """
+    cb_path = get_circuit_breaker_path(workspace_dir)
+    raw_data: Dict[str, Any] = {}
+    if cb_path.exists():
+        try:
+            with open(cb_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    raw_data = loaded
+        except Exception:
+            raw_data = {}
+
+    convs = raw_data.get("conversations", {})
+    if not isinstance(convs, dict):
+        convs = {}
+
+    tripped_convs = []
+    latest_cid = None
+    latest_ts = None
+
+    for cid, cdata in convs.items():
+        if isinstance(cdata, dict):
+            is_tripped = bool(cdata.get("tripped") or cdata.get("circuitBreakerTripped"))
+            if is_tripped:
+                tripped_convs.append(cid)
+            ts = cdata.get("lastContinueTimestamp")
+            if ts and (latest_ts is None or ts > latest_ts):
+                latest_ts = ts
+                latest_cid = cid
+
+    return {
+        "totalConversations": len(convs),
+        "trippedConversationsCount": len(tripped_convs),
+        "trippedConversations": len(tripped_convs),
+        "trippedConversationsList": sorted(tripped_convs),
+        "latestConversationId": latest_cid,
+        "anyTripped": len(tripped_convs) > 0,
     }
 
 
@@ -339,16 +386,23 @@ def load_circuit_breaker(
     if not isinstance(convs, dict):
         convs = {}
 
+    summary = get_circuit_breaker_project_summary(workspace_dir)
     cid = str(conversation_id).strip() if conversation_id else None
     if cid and cid in convs:
         entry = _normalize_cb_entry(convs[cid])
+        entry["conversationId"] = cid
     else:
         if cid:
             entry = dict(default_rec)
+            entry["conversationId"] = cid
         else:
             entry = _normalize_cb_entry(raw_data)
+            if summary["totalConversations"] > 0:
+                entry["tripped"] = summary["anyTripped"]
+                entry["circuitBreakerTripped"] = summary["anyTripped"]
 
     entry["_raw_conversations"] = {k: _normalize_cb_entry(v) for k, v in convs.items()}
+    entry["projectSummary"] = summary
     if cid:
         entry["_target_conversation_id"] = cid
     return entry
@@ -361,21 +415,39 @@ def save_circuit_breaker(
 ) -> None:
     cb_path = get_circuit_breaker_path(workspace_dir)
     cb_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    cid = conversation_id or data.get("_target_conversation_id")
-    convs = data.get("_raw_conversations", {})
-    if not isinstance(convs, dict):
+
+    cid = conversation_id or data.get("_target_conversation_id") or data.get("conversationId")
+    convs = data.get("_raw_conversations")
+    if convs is None:
         convs = {}
+        if cb_path.exists():
+            try:
+                with open(cb_path, "r", encoding="utf-8") as f:
+                    loaded = json.load(f)
+                    if isinstance(loaded, dict) and isinstance(loaded.get("conversations"), dict):
+                        convs = loaded["conversations"]
+            except Exception:
+                convs = {}
 
     normalized = _normalize_cb_entry(data)
     if cid:
-        convs[str(cid).strip()] = normalized
+        cid_str = str(cid).strip()
+        normalized["conversationId"] = cid_str
+        convs[cid_str] = normalized
+
+    any_tripped = any(
+        isinstance(v, dict) and (v.get("tripped") or v.get("circuitBreakerTripped"))
+        for v in convs.values()
+    ) or normalized["tripped"]
 
     out_payload = dict(normalized)
-    out_payload["schemaVersion"] = "1.2.1"
+    out_payload["schemaVersion"] = "1.2.2"
+    out_payload["tripped"] = any_tripped
+    out_payload["circuitBreakerTripped"] = any_tripped
     out_payload["conversations"] = convs
     out_payload.pop("_raw_conversations", None)
     out_payload.pop("_target_conversation_id", None)
+    out_payload.pop("projectSummary", None)
 
     temp_path = cb_path.with_suffix(".tmp")
     with open(temp_path, "w", encoding="utf-8") as f:

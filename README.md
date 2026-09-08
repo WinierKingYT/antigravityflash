@@ -1,10 +1,10 @@
-# Antigravity Strict Engineering Kernel (V1.2.1)
+# Antigravity Strict Engineering Kernel (V1.2.2)
 
 A deterministic, risk-adaptive, reality-hardened, and adversarial reliability kernel for Google Antigravity on Windows.
 
 [![CI](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml/badge.svg)](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-1.2.1-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-527%20passed-brightgreen.svg)](run_tests.py)
+[![Version](https://img.shields.io/badge/version-1.2.2-blue.svg)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-546%20passed-brightgreen.svg)](run_tests.py)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ---
@@ -179,10 +179,12 @@ antigravity-strict-engineering-kernel/
 ├── .github/workflows/ci.yml           # GitHub Actions CI workflow
 ├── GEMINI.md                          # Antigravity strict engineering rules
 ├── hooks.json                         # Antigravity lifecycle hooks configuration
-├── plugin.json                        # Antigravity plugin descriptor compatibility
-├── pyproject.toml                     # Package specification (v1.2.0)
+├── pyproject.toml                     # Package specification (v1.2.2)
 └── run_tests.py                       # Top-level test runner
 ```
+
+> [!NOTE]
+> **Packaging & Compatibility Status**: Official Antigravity plugin packaging is deferred / not currently claimed. The kernel installs and integrates directly via Antigravity lifecycle hooks (`~/.gemini/config/hooks.json`), core agent prompts (`~/.gemini/config/agents/`), and instructions (`~/.gemini/GEMINI.md`).
 
 ---
 

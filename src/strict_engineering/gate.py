@@ -307,6 +307,28 @@ def inspect_completion_readiness(workspace: Union[str, Path]) -> Tuple[bool, Lis
         unresolved_gates.append("No active Strict Engineering harness state found")
         return False, unresolved_gates
 
+    # Runtime Execution Readiness Check
+    runtime_status = str(state.get("runtimeStatus", "RUNNING"))
+    pause_reason = state.get("pauseReason")
+    if runtime_status.startswith("PAUSED_") or runtime_status in {"DISABLED", "INACTIVE", "STOPPED"}:
+        msg = f"Runtime execution is paused or disabled: {runtime_status}"
+        if pause_reason:
+            msg += f" (Reason: {pause_reason})"
+        unresolved_gates.append(msg)
+
+    # Circuit Breaker Check across project conversations
+    if runtime_safety is not None:
+        try:
+            cb_summary = runtime_safety.get_circuit_breaker_project_summary(ws)
+            if cb_summary.get("anyTripped", False):
+                unresolved_gates.append("Circuit breaker is TRIPPED across project conversations")
+            else:
+                cb_data = runtime_safety.load_circuit_breaker(ws)
+                if cb_data.get("tripped", False) or cb_data.get("circuitBreakerTripped", False):
+                    unresolved_gates.append("Circuit breaker is TRIPPED")
+        except Exception:
+            pass
+
     # 1. Original Request Integrity Check
     if not kernel.verify_original_intent_integrity(ws):
         unresolved_gates.append("Original request SHA-256 integrity check FAILED (original-request.md was tampered with)")
@@ -340,8 +362,15 @@ def inspect_completion_readiness(workspace: Union[str, Path]) -> Tuple[bool, Lis
     else:
         unresolved_gates.append("coverage.json does not exist")
 
-    # 5. Invalidate Stale Requirements & Check Freshness
-    stale_ids = kernel.check_and_invalidate_stale(ws)
+    # 5. Detect Stale Requirements & Check Freshness (Pure Inspection)
+    if hasattr(kernel, "detect_stale_requirements"):
+        stale_ids = kernel.detect_stale_requirements(ws)
+    else:
+        stale_ids = kernel.check_and_invalidate_stale(ws)
+    if stale_ids:
+        unresolved_gates.append(
+            f"{len(stale_ids)} requirement(s) would become STALE due to workspace modifications post-verification: {', '.join(stale_ids)}"
+        )
 
     # 6. Requirement Ledger Audit & Execution-Backed Pass Verification
     reqs = kernel.load_requirements(ws)
@@ -649,7 +678,10 @@ def inspect_completion_readiness(workspace: Union[str, Path]) -> Tuple[bool, Lis
         # Check Decision Coverage and detect Orphaned Requirements
         if decision_coverage is not None:
             try:
-                dec_cov = decision_coverage.sync_decision_coverage(ws)
+                if hasattr(decision_coverage, "compute_decision_coverage"):
+                    dec_cov = decision_coverage.compute_decision_coverage(ws)
+                else:
+                    dec_cov = decision_coverage.sync_decision_coverage(ws)
                 orphans = dec_cov.get("orphanedRequirements", [])
                 if orphans:
                     unresolved_gates.append(f"Orphaned requirements detected without decision trace: {', '.join(orphans)}")
@@ -784,6 +816,12 @@ def evaluate_stop(payload: Any) -> Dict[str, Any]:
         return {"decision": "allow", "reason": f"Unknown abnormal termination token ({raw_token}). Halting safely."}
 
     state = kernel.load_state(workspace)
+    # Authorized lifecycle mutation on stop: actively transition any stale requirements
+    if hasattr(kernel, "check_and_invalidate_stale"):
+        try:
+            kernel.check_and_invalidate_stale(workspace)
+        except Exception:
+            pass
     is_ready, unresolved_gates = inspect_completion_readiness(workspace)
 
     if not is_ready:

@@ -144,19 +144,12 @@ class CLITestSuite(unittest.TestCase):
         self.assertEqual(code, cli.EXIT_HARNESS_BLOCKED)
         self.assertIn("[BLOCKED] Strict Engineering harness already exists", out.getvalue())
 
-    def test_cli_07_init_existing_harness_with_force_succeeds(self):
-        """CLI-07: init with --force overwrites existing harness cleanly."""
+    def test_cli_07_init_force_flag_removed_from_parser(self):
+        """CLI-07: init with --force is rejected by argument parser."""
         repo = self.root / "force_repo"
         repo.mkdir(parents=True, exist_ok=True)
-        kernel.initialize_harness(repo, original_intent="Old goal")
-
-        out = io.StringIO()
-        with patch("sys.stdout", out):
-            code = cli.main(["init", "--workspace", str(repo), "--intent", "Overwritten goal", "--force"])
-        self.assertEqual(code, cli.EXIT_SUCCESS)
-        self.assertIn("Strict Engineering Harness initialized successfully", out.getvalue())
-        req_content = (repo / ".agent-harness" / "original-request.md").read_text(encoding="utf-8").strip()
-        self.assertEqual(req_content, "Overwritten goal")
+        code = cli.main(["init", "--workspace", str(repo), "--intent", "Overwritten goal", "--force"])
+        self.assertEqual(code, cli.EXIT_INVALID_USAGE)
 
     def test_cli_08_init_without_intent_in_non_interactive_fails(self):
         """CLI-08: init without intent in non-interactive environment rejects fabrication (exit code 2)."""

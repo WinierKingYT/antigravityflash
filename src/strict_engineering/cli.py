@@ -1,5 +1,5 @@
 """
-Strict Engineering Kernel V1.2.1 - Operational CLI, Distribution & Project UX
+Strict Engineering Kernel V1.2.2 - Operational CLI, Distribution & Project UX
 Provides the unified command-line entrypoint `strict-engineering` for:
 - version
 - install
@@ -33,7 +33,7 @@ except (ImportError, ValueError):
         import strict_engineering
         __version__ = strict_engineering.__version__
     except Exception:
-        __version__ = "1.2.1"
+        __version__ = "1.2.2"
 
 try:
     from . import kernel
@@ -305,25 +305,14 @@ def cmd_init(args: argparse.Namespace) -> int:
     # Check existing harness
     harness_dir = workspace / ".agent-harness"
     state_file = harness_dir / "state.json"
-    if state_file.exists():
-        if not getattr(args, "force", False):
-            print(
-                f"[BLOCKED] Strict Engineering harness already exists in {workspace}.\n"
-                f"Use 'strict-engineering status' to inspect, or specify --force to reinitialize."
-            )
-            return EXIT_HARNESS_BLOCKED
-        else:
-            # Safely archive existing harness to .archive before reinitializing
-            archive_dir = harness_dir / ".archive" / f"harness-{installer.utc_timestamp_str()}"
-            archive_dir.mkdir(parents=True, exist_ok=True)
-            for item in harness_dir.iterdir():
-                if item.name == ".archive":
-                    continue
-                if item.is_file():
-                    shutil.copy2(item, archive_dir / item.name)
-                elif item.is_dir():
-                    shutil.copytree(item, archive_dir / item.name, dirs_exist_ok=True)
-            print(f"[INFO] Existing harness archived to {archive_dir} prior to reinitialization (--force).")
+    if harness_dir.exists() and state_file.exists():
+        print(
+            f"[BLOCKED] Strict Engineering harness already exists in {workspace}.\n"
+            f"Initialization aborted to protect existing project truth.\n"
+            f"Use 'strict-engineering status' to inspect current project state.\n"
+            f"If you intentionally want a new engineering project, manually archive or remove .agent-harness outside the kernel."
+        )
+        return EXIT_HARNESS_BLOCKED
 
     # Determine intent without fabricating synthetic text
     intent = args.intent
@@ -449,9 +438,16 @@ def cmd_status(args: argparse.Namespace) -> int:
             pass
 
     # Circuit breaker check
-    cb_data = runtime_safety.load_circuit_breaker(workspace)
+    target_conv_raw = getattr(args, "conversation", None)
+    target_conv = str(target_conv_raw).strip() if (isinstance(target_conv_raw, str) and target_conv_raw.strip()) else None
+    cb_data = runtime_safety.load_circuit_breaker(workspace, conversation_id=target_conv)
+    cb_summary = cb_data.get("projectSummary", {})
+    if not cb_summary and hasattr(runtime_safety, "get_circuit_breaker_project_summary"):
+        cb_summary = runtime_safety.get_circuit_breaker_project_summary(workspace)
+
     cb_tripped = bool(cb_data.get("tripped", cb_data.get("circuitBreakerTripped", False)))
     cb_consecutive = int(cb_data.get("automaticContinueCount", cb_data.get("consecutiveContinuesWithoutProgress", 0)))
+    cb_reason = cb_data.get("tripReason")
 
     # Evidence count
     evidence_file = harness_dir / "evidence.jsonl"
@@ -469,6 +465,10 @@ def cmd_status(args: argparse.Namespace) -> int:
         blocked_reasons.append("Hooks are globally disabled in ~/.gemini/config/hooks.json")
         completion_ready = False
 
+    if target_conv and cb_tripped:
+        blocked_reasons.append(f"Circuit breaker is TRIPPED for conversation '{target_conv}': {cb_reason or 'Automatic continue limit exceeded'}")
+        completion_ready = False
+
     non_pass = [r.get("id") for r in requirements if r.get("status") != "PASS"]
     if non_pass and not any("requirement(s) not in PASS status" in r for r in blocked_reasons):
         blocked_reasons.append(f"{len(non_pass)} requirement(s) not in PASS status: {', '.join(str(x) for x in non_pass[:5])}{'...' if len(non_pass) > 5 else ''}")
@@ -477,6 +477,20 @@ def cmd_status(args: argparse.Namespace) -> int:
     latency_summary = observability.get_latency_summary(gemini_dir)
     recent_events = observability.load_global_events(limit=5, gemini_dir=gemini_dir)
     last_event = recent_events[-1] if recent_events else None
+
+    cb_dict = {
+        "tripped": cb_tripped,
+        "consecutiveContinues": cb_consecutive,
+        "projectSummary": cb_summary,
+    }
+    if target_conv:
+        cb_dict["conversationId"] = target_conv
+        cb_dict["tripReason"] = cb_reason
+    else:
+        cb_dict["totalConversations"] = cb_summary.get("totalConversations", 0)
+        cb_dict["trippedConversationsCount"] = cb_summary.get("trippedConversationsCount", 0)
+        cb_dict["trippedConversations"] = cb_summary.get("trippedConversations", [])
+        cb_dict["latestConversationId"] = cb_summary.get("latestConversationId")
 
     data = {
         "active": is_active,
@@ -493,10 +507,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         "totalRequirements": len(requirements),
         "evidenceCount": evidence_count,
         "blockingConcerns": blocking_concerns,
-        "circuitBreaker": {
-            "tripped": cb_tripped,
-            "consecutiveContinues": cb_consecutive,
-        },
+        "circuitBreaker": cb_dict,
         "telemetry": {
             "latency": latency_summary,
             "lastEvent": last_event,
@@ -525,8 +536,22 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"Blocking Concerns:    {len(blocking_concerns)}")
         for bc in blocking_concerns[:3]:
             print(f"  - {bc}")
-    if cb_tripped:
-        print(f"Circuit Breaker:      TRIPPED ({cb_consecutive} continues without progress)")
+    if target_conv:
+        st_label = "TRIPPED" if cb_tripped else "HEALTHY"
+        print(f"Circuit Breaker ({target_conv}): {st_label} ({cb_consecutive} continues without progress)")
+        if cb_reason:
+            print(f"  Trip Reason:        {cb_reason}")
+    else:
+        tot_convs = cb_summary.get("totalConversations", 0)
+        tripped_cnt = cb_summary.get("trippedConversationsCount", 0)
+        latest_cid = cb_summary.get("latestConversationId")
+        if tripped_cnt > 0:
+            print(f"Circuit Breaker:      TRIPPED ({tripped_cnt}/{tot_convs} conversations tripped)")
+            print(f"  Tripped Convs:      {', '.join(cb_summary.get('trippedConversations', []))}")
+        else:
+            print(f"Circuit Breaker:      HEALTHY ({tripped_cnt}/{tot_convs} conversations tripped)")
+        if latest_cid:
+            print(f"  Latest Conv:        {latest_cid}")
     if latency_summary["count"] > 0:
         print(f"Hook Latency:         p50={latency_summary['p50Ms']}ms, p95={latency_summary['p95Ms']}ms, max={latency_summary['maxMs']}ms ({latency_summary['count']} samples)")
     if last_event:
@@ -755,9 +780,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         m_ok, m_issues = distribution.verify_manifest_integrity(gemini_dir)
         if m_ok:
             mod_count = len(manifest.get("managedFiles", {}).get("modules", {}))
-            add_check("Installation manifest", "PASS", f"Manifest valid ({mod_count} module hashes match disk)")
+            agent_count = len(manifest.get("managedFiles", {}).get("agents", {}))
+            add_check("Installation manifest", "PASS", f"Manifest valid ({mod_count} modules, {agent_count} core agents, hooks and prompt verified)")
         else:
-            add_check("Installation manifest", "FAIL", f"Module hash drift detected: {'; '.join(m_issues)}", "Run 'strict-engineering update' or 'strict-engineering install'.")
+            add_check("Installation manifest", "FAIL", f"Manifest drift detected: {'; '.join(m_issues)}", "Run 'strict-engineering update' or 'strict-engineering install'.")
 
     # 16. Observability log
     obs_file = gemini_dir / "config" / "strict-engineering" / "observability.jsonl"
@@ -928,7 +954,15 @@ def cmd_update(args: argparse.Namespace) -> int:
 
     if getattr(args, "check", False):
         print("Checking for Strict Engineering updates...")
-        avail, cur, lat = distribution.check_for_updates()
+        res = distribution.check_for_updates()
+        if getattr(res, "status", None) == distribution.UpdateCheckStatus.CHECK_FAILED:
+            print(f"[FAIL] Update check failed: {res.error}")
+            return EXIT_OPERATIONAL_FAILURE
+
+        cur = getattr(res, "current_version", __version__)
+        lat = getattr(res, "latest_version", cur) or cur
+        avail = bool(getattr(res, "update_available", False))
+
         print(f"Current installed version: {cur}")
         print(f"Latest available version:  {lat}")
         if avail:
@@ -1073,13 +1107,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_init = subparsers.add_parser("init", help="Initialize Strict Engineering harness in a project")
     p_init.add_argument("--intent", type=str, default="", help="Original user intent describing project goal")
     p_init.add_argument("--workspace", type=str, default="", help="Target workspace path (defaults to current dir)")
-    p_init.add_argument("--force", action="store_true", help="Force re-initialization if harness exists")
     p_init.add_argument("--await-intent", action="store_true", help="Initialize in safe awaiting-intent state without intent text")
     p_init.set_defaults(func=cmd_init)
 
     # status
     p_stat = subparsers.add_parser("status", help="Show project lifecycle, requirements, and completion status")
     p_stat.add_argument("--workspace", type=str, default="", help="Target workspace path (defaults to current dir)")
+    p_stat.add_argument("--conversation", type=str, default="", help="Query exact conversation circuit breaker state")
     p_stat.add_argument("--json", action="store_true", help="Output machine-readable JSON")
     p_stat.add_argument("--verbose", action="store_true", help="Include full details")
     p_stat.set_defaults(func=cmd_status)

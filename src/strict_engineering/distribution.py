@@ -768,9 +768,13 @@ def update_installation(
 
     effective_source = distribution_source or CANONICAL_DISTRIBUTION_SOURCE
 
-    # Validate source trust: must be canonical repo, valid HTTP(S) URL, or valid local path
-    is_url = effective_source.startswith("http://") or effective_source.startswith("https://")
-    if effective_source != CANONICAL_DISTRIBUTION_SOURCE and not is_url and not Path(effective_source).exists():
+    # Validate source trust: must be canonical repo, local test endpoint, or valid local path
+    is_trusted_url = (
+        effective_source == CANONICAL_DISTRIBUTION_SOURCE
+        or effective_source.startswith("http://127.0.0.1")
+        or effective_source.startswith("http://localhost")
+    )
+    if not is_trusted_url and not Path(effective_source).exists():
         msg = f"Update rejected: untrusted distribution source '{effective_source}'. Must be canonical repository or valid local path."
         observability.record_global_event("UPDATE_REJECTED", {"reason": msg}, gemini_dir=gemini_dir)
         return False, msg, {}

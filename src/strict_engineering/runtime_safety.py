@@ -286,39 +286,100 @@ def compute_state_progress_fingerprint(workspace_dir: Union[str, Path]) -> str:
     return hashlib.sha256(canonical_bytes).hexdigest()
 
 
-def load_circuit_breaker(workspace_dir: Union[str, Path]) -> Dict[str, Any]:
+def _normalize_cb_entry(entry: Dict[str, Any], default_max: int = DEFAULT_MAX_AUTOMATIC_CONTINUES) -> Dict[str, Any]:
+    """Normalize a single circuit breaker record with bidirectional alias synchronization."""
+    tripped = bool(entry.get("tripped") or entry.get("circuitBreakerTripped", False))
+    count = int(entry.get("automaticContinueCount", entry.get("consecutiveContinuesWithoutProgress", 0)))
+    max_c = int(entry.get("maxContinues", default_max))
+    fp = entry.get("lastStateFingerprint")
+    ts = entry.get("lastContinueTimestamp")
+    tc = entry.get("lastTerminationClass")
+    reason = entry.get("tripReason")
+
+    return {
+        "automaticContinueCount": count,
+        "consecutiveContinuesWithoutProgress": count,
+        "lastStateFingerprint": fp,
+        "lastTerminationClass": tc,
+        "lastContinueTimestamp": ts,
+        "tripped": tripped,
+        "circuitBreakerTripped": tripped,
+        "tripReason": reason,
+        "maxContinues": max_c,
+    }
+
+
+def load_circuit_breaker(
+    workspace_dir: Union[str, Path],
+    conversation_id: Optional[str] = None,
+) -> Dict[str, Any]:
     cb_path = get_circuit_breaker_path(workspace_dir)
-    if not cb_path.exists():
-        return {
-            "automaticContinueCount": 0,
-            "lastStateFingerprint": None,
-            "lastTerminationClass": None,
-            "lastContinueTimestamp": None,
-            "tripped": False,
-            "tripReason": None,
-            "maxContinues": DEFAULT_MAX_AUTOMATIC_CONTINUES,
-        }
-    try:
-        with open(cb_path, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return {
-            "automaticContinueCount": 0,
-            "lastStateFingerprint": None,
-            "lastTerminationClass": None,
-            "lastContinueTimestamp": None,
-            "tripped": False,
-            "tripReason": None,
-            "maxContinues": DEFAULT_MAX_AUTOMATIC_CONTINUES,
-        }
+    default_rec = {
+        "automaticContinueCount": 0,
+        "consecutiveContinuesWithoutProgress": 0,
+        "lastStateFingerprint": None,
+        "lastTerminationClass": None,
+        "lastContinueTimestamp": None,
+        "tripped": False,
+        "circuitBreakerTripped": False,
+        "tripReason": None,
+        "maxContinues": DEFAULT_MAX_AUTOMATIC_CONTINUES,
+    }
+    raw_data: Dict[str, Any] = {}
+    if cb_path.exists():
+        try:
+            with open(cb_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    raw_data = loaded
+        except Exception:
+            raw_data = {}
+
+    convs = raw_data.get("conversations", {})
+    if not isinstance(convs, dict):
+        convs = {}
+
+    cid = str(conversation_id).strip() if conversation_id else None
+    if cid and cid in convs:
+        entry = _normalize_cb_entry(convs[cid])
+    else:
+        if cid:
+            entry = dict(default_rec)
+        else:
+            entry = _normalize_cb_entry(raw_data)
+
+    entry["_raw_conversations"] = {k: _normalize_cb_entry(v) for k, v in convs.items()}
+    if cid:
+        entry["_target_conversation_id"] = cid
+    return entry
 
 
-def save_circuit_breaker(workspace_dir: Union[str, Path], data: Dict[str, Any]) -> None:
+def save_circuit_breaker(
+    workspace_dir: Union[str, Path],
+    data: Dict[str, Any],
+    conversation_id: Optional[str] = None,
+) -> None:
     cb_path = get_circuit_breaker_path(workspace_dir)
     cb_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    cid = conversation_id or data.get("_target_conversation_id")
+    convs = data.get("_raw_conversations", {})
+    if not isinstance(convs, dict):
+        convs = {}
+
+    normalized = _normalize_cb_entry(data)
+    if cid:
+        convs[str(cid).strip()] = normalized
+
+    out_payload = dict(normalized)
+    out_payload["schemaVersion"] = "1.2.1"
+    out_payload["conversations"] = convs
+    out_payload.pop("_raw_conversations", None)
+    out_payload.pop("_target_conversation_id", None)
+
     temp_path = cb_path.with_suffix(".tmp")
     with open(temp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+        json.dump(out_payload, f, indent=2)
     os.replace(temp_path, cb_path)
 
 
@@ -329,11 +390,13 @@ def evaluate_circuit_breaker(
 ) -> Tuple[bool, int, str]:
     """
     Evaluates whether an automatic continue is permitted or if the circuit breaker trips.
+    Enforces conversation-level isolation so that continue counts and tripped states
+    in conversation A never leak into conversation B within the same workspace.
     Returns:
     (can_continue: bool, current_count: int, reason: str)
     """
     ws = Path(workspace_dir).resolve()
-    cb_data = load_circuit_breaker(ws)
+    cb_data = load_circuit_breaker(ws, conversation_id=conversation_id)
     current_fp = compute_state_progress_fingerprint(ws)
     last_fp = cb_data.get("lastStateFingerprint")
     current_count = int(cb_data.get("automaticContinueCount", 0))
@@ -342,17 +405,20 @@ def evaluate_circuit_breaker(
     if last_fp is None or current_fp != last_fp:
         # Progress has occurred (or first evaluation)! Reset counter.
         cb_data["automaticContinueCount"] = 0
+        cb_data["consecutiveContinuesWithoutProgress"] = 0
         cb_data["lastStateFingerprint"] = current_fp
         cb_data["lastContinueTimestamp"] = utc_now_iso()
         cb_data["tripped"] = False
+        cb_data["circuitBreakerTripped"] = False
         cb_data["tripReason"] = None
         cb_data["maxContinues"] = max_continues
-        save_circuit_breaker(ws, cb_data)
+        save_circuit_breaker(ws, cb_data, conversation_id=conversation_id)
         return True, 0, "Engineering progress detected; circuit breaker counter reset"
 
     # Fingerprint is IDENTICAL: no progress made since last Stop
     current_count += 1
     cb_data["automaticContinueCount"] = current_count
+    cb_data["consecutiveContinuesWithoutProgress"] = current_count
     cb_data["lastContinueTimestamp"] = utc_now_iso()
 
     if current_count >= max_continues:
@@ -362,24 +428,41 @@ def evaluate_circuit_breaker(
             f"State fingerprint remained identical ({current_fp[:12]}). Pausing execution."
         )
         cb_data["tripped"] = True
+        cb_data["circuitBreakerTripped"] = True
         cb_data["tripReason"] = trip_reason
-        save_circuit_breaker(ws, cb_data)
+        save_circuit_breaker(ws, cb_data, conversation_id=conversation_id)
         return False, current_count, trip_reason
 
     # Bounded continue allowed
     cb_data["tripped"] = False
+    cb_data["circuitBreakerTripped"] = False
     cb_data["tripReason"] = None
-    save_circuit_breaker(ws, cb_data)
+    save_circuit_breaker(ws, cb_data, conversation_id=conversation_id)
     return True, current_count, f"Automatic continue {current_count}/{max_continues} permitted"
 
 
-def reset_circuit_breaker(workspace_dir: Union[str, Path]) -> None:
+def reset_circuit_breaker(
+    workspace_dir: Union[str, Path],
+    conversation_id: Optional[str] = None,
+) -> None:
     ws = Path(workspace_dir).resolve()
-    cb_data = load_circuit_breaker(ws)
+    cb_data = load_circuit_breaker(ws, conversation_id=conversation_id)
     cb_data["automaticContinueCount"] = 0
+    cb_data["consecutiveContinuesWithoutProgress"] = 0
     cb_data["tripped"] = False
+    cb_data["circuitBreakerTripped"] = False
     cb_data["tripReason"] = None
-    save_circuit_breaker(ws, cb_data)
+
+    if conversation_id is None:
+        convs = cb_data.get("_raw_conversations", {})
+        for cid in convs:
+            convs[cid]["automaticContinueCount"] = 0
+            convs[cid]["consecutiveContinuesWithoutProgress"] = 0
+            convs[cid]["tripped"] = False
+            convs[cid]["circuitBreakerTripped"] = False
+            convs[cid]["tripReason"] = None
+
+    save_circuit_breaker(ws, cb_data, conversation_id=conversation_id)
 
 
 # ---------------------------------------------------------------------------

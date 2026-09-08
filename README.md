@@ -1,10 +1,10 @@
-# Antigravity Strict Engineering Kernel (V1.2.0)
+# Antigravity Strict Engineering Kernel (V1.2.1)
 
 A deterministic, risk-adaptive, reality-hardened, and adversarial reliability kernel for Google Antigravity on Windows.
 
 [![CI](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml/badge.svg)](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-520%20passed-brightgreen.svg)](run_tests.py)
+[![Version](https://img.shields.io/badge/version-1.2.1-blue.svg)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-527%20passed-brightgreen.svg)](run_tests.py)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ---
@@ -247,7 +247,7 @@ strict-engineering uninstall
 
 ## 🧪 Running Tests
 
-To run the complete suite of 520 tests across all 24 test modules:
+To run the complete suite of 527 tests across all 25 test modules:
 
 ```bash
 python run_tests.py
@@ -263,8 +263,8 @@ python -m unittest discover -s tests -p "test_*.py"
 
 ## 📊 Verification Metrics
 
-- **Total Test Cases:** 520
-- **Total Test Suites:** 24
+- **Total Test Cases:** 527
+- **Total Test Suites:** 25
 - **Pass Rate:** 100% (Zero Failures, Zero Errors)
 - **Zero External Dependencies:** Built entirely with Python standard library for maximum portability and zero supply-chain risk.
 

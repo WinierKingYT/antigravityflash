@@ -1,5 +1,5 @@
 """
-Strict Engineering Kernel V1.2.0 - Operational CLI, Distribution & Project UX
+Strict Engineering Kernel V1.2.1 - Operational CLI, Distribution & Project UX
 Provides the unified command-line entrypoint `strict-engineering` for:
 - version
 - install
@@ -33,7 +33,7 @@ except (ImportError, ValueError):
         import strict_engineering
         __version__ = strict_engineering.__version__
     except Exception:
-        __version__ = "1.2.0"
+        __version__ = "1.2.1"
 
 try:
     from . import kernel
@@ -43,6 +43,7 @@ try:
     from . import context_registry
     from . import distribution
     from . import observability
+    from . import concern
 except (ImportError, ValueError):
     import kernel  # type: ignore
     import gate  # type: ignore
@@ -51,6 +52,7 @@ except (ImportError, ValueError):
     import context_registry  # type: ignore
     import distribution  # type: ignore
     import observability  # type: ignore
+    import concern  # type: ignore
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +313,17 @@ def cmd_init(args: argparse.Namespace) -> int:
             )
             return EXIT_HARNESS_BLOCKED
         else:
-            print("[INFO] Overwriting existing harness due to --force flag.")
+            # Safely archive existing harness to .archive before reinitializing
+            archive_dir = harness_dir / ".archive" / f"harness-{installer.utc_timestamp_str()}"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+            for item in harness_dir.iterdir():
+                if item.name == ".archive":
+                    continue
+                if item.is_file():
+                    shutil.copy2(item, archive_dir / item.name)
+                elif item.is_dir():
+                    shutil.copytree(item, archive_dir / item.name, dirs_exist_ok=True)
+            print(f"[INFO] Existing harness archived to {archive_dir} prior to reinitialization (--force).")
 
     # Determine intent without fabricating synthetic text
     intent = args.intent
@@ -428,23 +440,18 @@ def cmd_status(args: argparse.Namespace) -> int:
                 c_data = json.load(f)
                 concerns = c_data if isinstance(c_data, list) else c_data.get("concerns", [])
                 for c in concerns:
-                    if c.get("status") in {"ACTIVE", "DISCOVERED"} and c.get("risk") in {"CRITICAL", "HIGH"}:
+                    c_status = c.get("status")
+                    c_risk = concern.get_concern_risk(c) if hasattr(concern, "get_concern_risk") else (c.get("riskLevel") or c.get("risk"))
+                    blocking_states = getattr(concern, "CONCERN_BLOCKING_STATES", {"ACTIVE", "DISCOVERED"})
+                    if c_status in blocking_states and c_risk in {"CRITICAL", "HIGH"}:
                         blocking_concerns.append(f"{c.get('id', 'CONCERN')}: {c.get('title', c.get('statement', ''))}")
         except Exception:
             pass
 
     # Circuit breaker check
-    cb_file = harness_dir / "circuit-breaker.json"
-    cb_tripped = False
-    cb_consecutive = 0
-    if cb_file.exists():
-        try:
-            with open(cb_file, "r", encoding="utf-8") as f:
-                cb_data = json.load(f)
-                cb_tripped = bool(cb_data.get("circuitBreakerTripped", False))
-                cb_consecutive = int(cb_data.get("consecutiveContinuesWithoutProgress", 0))
-        except Exception:
-            pass
+    cb_data = runtime_safety.load_circuit_breaker(workspace)
+    cb_tripped = bool(cb_data.get("tripped", cb_data.get("circuitBreakerTripped", False)))
+    cb_consecutive = int(cb_data.get("automaticContinueCount", cb_data.get("consecutiveContinuesWithoutProgress", 0)))
 
     # Evidence count
     evidence_file = harness_dir / "evidence.jsonl"
@@ -456,33 +463,15 @@ def cmd_status(args: argparse.Namespace) -> int:
         except Exception:
             pass
 
-    # Completion readiness analysis
-    blocked_reasons = []
-    if not is_active:
-        blocked_reasons.append("Harness is disabled in state.json")
+    # Authoritative completion readiness analysis directly from engineering gate
+    completion_ready, blocked_reasons = gate.inspect_completion_readiness(workspace)
     if global_hook_state == "DISABLED":
         blocked_reasons.append("Hooks are globally disabled in ~/.gemini/config/hooks.json")
-    if phase != "COMPLETE":
-        if phase != "VERIFICATION":
-            blocked_reasons.append(f"Lifecycle phase is '{phase}' (requires VERIFICATION / COMPLETE)")
-        if not spec_locked:
-            blocked_reasons.append("Product specification is not locked")
-        if not acceptance_locked:
-            blocked_reasons.append("Acceptance test contracts are not locked")
-        if not requirements:
-            blocked_reasons.append("Requirements ledger is empty")
-        else:
-            non_pass = [r.get("id") for r in requirements if r.get("status") != "PASS"]
-            if non_pass:
-                blocked_reasons.append(f"{len(non_pass)} requirement(s) not in PASS status: {', '.join(non_pass[:5])}{'...' if len(non_pass) > 5 else ''}")
-        if blocking_concerns:
-            blocked_reasons.append(f"{len(blocking_concerns)} unresolved CRITICAL/HIGH concern(s)")
-        if cb_tripped:
-            blocked_reasons.append("Circuit breaker is tripped (execution halted)")
-        if runtime_status.startswith("PAUSED_"):
-            blocked_reasons.append(f"Execution is paused ({runtime_status}: {pause_reason or 'No detail'})")
+        completion_ready = False
 
-    completion_ready = (len(blocked_reasons) == 0 and phase in {"VERIFICATION", "COMPLETE"})
+    non_pass = [r.get("id") for r in requirements if r.get("status") != "PASS"]
+    if non_pass and not any("requirement(s) not in PASS status" in r for r in blocked_reasons):
+        blocked_reasons.append(f"{len(non_pass)} requirement(s) not in PASS status: {', '.join(str(x) for x in non_pass[:5])}{'...' if len(non_pass) > 5 else ''}")
 
     # Observability & telemetry
     latency_summary = observability.get_latency_summary(gemini_dir)
@@ -713,20 +702,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     # 11. Runtime/circuit breaker anomalies
     if harness_dir.exists():
-        cb_file = harness_dir / "circuit-breaker.json"
-        if cb_file.exists():
-            try:
-                with open(cb_file, "r", encoding="utf-8") as f:
-                    cb_data = json.load(f)
-                if cb_data.get("circuitBreakerTripped"):
-                    add_check("Runtime/circuit breaker", "WARN", "Circuit breaker is currently TRIPPED", "Run 'strict-engineering resume' after resolving blockers.")
-                else:
-                    consec = cb_data.get("consecutiveContinuesWithoutProgress", 0)
-                    add_check("Runtime/circuit breaker", "PASS", f"Circuit breaker normal ({consec} consecutive continues)")
-            except Exception as e:
-                add_check("Runtime/circuit breaker", "WARN", f"Could not read circuit breaker: {e}")
+        cb_data = runtime_safety.load_circuit_breaker(workspace)
+        tripped = bool(cb_data.get("tripped", cb_data.get("circuitBreakerTripped", False)))
+        if tripped:
+            add_check("Runtime/circuit breaker", "WARN", "Circuit breaker is currently TRIPPED", "Run 'strict-engineering resume' after resolving blockers.")
         else:
-            add_check("Runtime/circuit breaker", "PASS", "No circuit breaker file (clean state)")
+            consec = int(cb_data.get("automaticContinueCount", cb_data.get("consecutiveContinuesWithoutProgress", 0)))
+            add_check("Runtime/circuit breaker", "PASS", f"Circuit breaker normal ({consec} consecutive continues)")
     else:
         add_check("Runtime/circuit breaker", "NOT_APPLICABLE", "No active harness in workspace")
 
@@ -758,6 +740,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         import strict_engineering.installer
         import strict_engineering.runtime_safety
         import strict_engineering.context_registry
+        import strict_engineering.concern
         import strict_engineering.distribution
         import strict_engineering.observability
         add_check("Package/import health", "PASS", "All kernel submodules imported cleanly")

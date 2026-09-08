@@ -83,6 +83,24 @@ RISK_RANKS = {
     "CRITICAL": 3,
 }
 
+CONCERN_BLOCKING_STATES = {
+    "DISCOVERED",
+    "UNRESOLVED",
+    "BLOCKED",
+    "ASKABLE",
+    "SUGGESTABLE",
+    "CHALLENGE_REQUIRED",
+    "ACTIVE",
+    "SAFE_INFERABLE",
+}
+
+
+def get_concern_risk(concern_data: Dict[str, Any]) -> str:
+    """Return normalized risk level (HIGH, CRITICAL, MEDIUM, LOW) from concern data."""
+    if not isinstance(concern_data, dict):
+        return "LOW"
+    return str(concern_data.get("riskLevel") or concern_data.get("risk") or "LOW").upper()
+
 CATEGORY_BASELINE_RISK = {
     "AUTHORIZATION": "CRITICAL",
     "FINANCIAL": "CRITICAL",
@@ -229,7 +247,7 @@ def validate_concern(concern_data: Dict[str, Any]) -> Tuple[bool, List[str]]:
         errors.append("Field 'source' must be a dict with non-empty 'type' and 'reference'.")
 
     # riskLevel
-    rl = concern_data.get("riskLevel")
+    rl = get_concern_risk(concern_data)
     if rl not in RISK_LEVELS:
         errors.append(f"Invalid riskLevel '{rl}'. Must be one of {RISK_LEVELS}.")
 
@@ -318,6 +336,7 @@ def create_concern(
     clean_status = str(status).upper().strip()
 
     # Resolve riskLevel
+    risk_level = risk_level or kwargs.get("risk") or kwargs.get("riskLevel")
     if not risk_level:
         calc_risk, _ = evaluate_concern_risk(title, description, clean_cat)
         risk_level = calc_risk
@@ -397,6 +416,7 @@ def create_concern(
         "candidateOptions": candidate_options if candidate_options is not None else kwargs.get("candidateOptions", []),
         "recommendedAction": str(rec_act) if rec_act else None,
         "riskLevel": str(risk_level).upper(),
+        "risk": str(risk_level).upper(),
         "createdAt": created_at or utc_now_iso(),
         "resolvedAt": resolved,
     }

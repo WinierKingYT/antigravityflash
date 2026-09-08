@@ -214,14 +214,79 @@ def verify_manifest_integrity(gemini_dir: Optional[Path] = None) -> Tuple[bool, 
 # ---------------------------------------------------------------------------
 # Transactional Update Engine
 # ---------------------------------------------------------------------------
+def parse_version_tuple(v_str: str) -> Tuple[int, ...]:
+    """Parse version string like '1.2.0' or 'v1.2.1' into integer tuple for comparison."""
+    clean = str(v_str).strip().lstrip("vV")
+    parts = []
+    for part in clean.split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            import re
+            m = re.match(r"^(\d+)", part)
+            if m:
+                parts.append(int(m.group(1)))
+            else:
+                parts.append(0)
+    return tuple(parts) if parts else (0, 0, 0)
+
+
 def check_for_updates(
     current_version: str = __version__,
     distribution_source: str = CANONICAL_DISTRIBUTION_SOURCE,
+    timeout_seconds: float = 3.0,
 ) -> Tuple[bool, str, str]:
-    """Check if an update is available without applying mutations."""
-    # In V1.2.0, distribution source is canonical repository.
-    # Returns (update_available, current_version, latest_version)
-    return False, current_version, current_version
+    """
+    Check if an update is available without applying mutations.
+    Queries GitHub Releases API for canonical repository or checks local source.
+    Returns: (update_available, current_version, latest_version)
+    """
+    import urllib.request
+    import urllib.error
+    import re
+
+    latest_version = current_version
+    update_available = False
+
+    if "github.com" in distribution_source:
+        parts = distribution_source.rstrip("/").split("github.com/")
+        if len(parts) == 2:
+            repo_path = parts[1]
+            api_url = f"https://api.github.com/repos/{repo_path}/releases/latest"
+            req = urllib.request.Request(
+                api_url,
+                headers={
+                    "User-Agent": f"strict-engineering/{current_version}",
+                    "Accept": "application/vnd.github.v3+json",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=timeout_seconds) as resp:
+                    if resp.status == 200:
+                        payload = json.loads(resp.read().decode("utf-8"))
+                        tag_name = payload.get("tag_name", "")
+                        if tag_name:
+                            latest_version = tag_name.lstrip("vV")
+                            if parse_version_tuple(latest_version) > parse_version_tuple(current_version):
+                                update_available = True
+            except Exception:
+                pass
+    elif Path(distribution_source).exists():
+        src_path = Path(distribution_source).resolve()
+        init_file = src_path / "src" / "strict_engineering" / "__init__.py"
+        if not init_file.exists():
+            init_file = src_path / "__init__.py"
+        if init_file.exists():
+            try:
+                m = re.search(r'__version__\s*=\s*"([^"]+)"', init_file.read_text(encoding="utf-8"))
+                if m:
+                    latest_version = m.group(1)
+                    if parse_version_tuple(latest_version) > parse_version_tuple(current_version):
+                        update_available = True
+            except Exception:
+                pass
+
+    return update_available, current_version, latest_version
 
 
 def update_installation(
@@ -282,7 +347,7 @@ def update_installation(
             with open(backup_snapshot_dir / MANIFEST_FILENAME, "w", encoding="utf-8") as bf:
                 json.dump(current_manifest, bf, indent=2)
 
-        # Snapshot hooks and GEMINI.md
+        # Snapshot hooks, GEMINI.md, and core agents
         hooks_file = g / "config" / "hooks.json"
         gemini_md_file = g / "GEMINI.md"
         agents_dir = g / "config" / "agents"
@@ -291,10 +356,31 @@ def update_installation(
             shutil.copy2(hooks_file, backup_snapshot_dir / "hooks.json")
         if gemini_md_file.exists():
             shutil.copy2(gemini_md_file, backup_snapshot_dir / "GEMINI.md")
+        if agents_dir.exists():
+            backup_agents_dir = backup_snapshot_dir / "agents"
+            backup_agents_dir.mkdir(parents=True, exist_ok=True)
+            for d in agents_dir.iterdir():
+                if d.is_dir() and d.name in MANAGED_CORE_AGENTS:
+                    shutil.copytree(d, backup_agents_dir / d.name, dirs_exist_ok=True)
 
         # 4. COMMIT: Copy staged modules into target config directory
         for f in staging_dir.glob("*.py"):
             shutil.copy2(f, cfg_dir / f.name)
+
+        # Update core agent definitions from source if available
+        candidate_agent_dirs = [
+            source_dir.parent.parent / "agents",
+            source_dir.parent / "agents",
+            source_dir / "agents",
+        ]
+        src_agents = None
+        for cad in candidate_agent_dirs:
+            if cad.exists() and cad.is_dir():
+                src_agents = cad
+                break
+
+        if src_agents and src_agents.exists():
+            installer.install_agents(src_agents, agents_dir)
 
         # Merge hooks and GEMINI managed block
         handler_script = cfg_dir / "hooks_handler.py"
@@ -409,6 +495,16 @@ def rollback_from_snapshot(
             target_gemini = gemini_dir / "GEMINI.md"
             shutil.copy2(snapshot_dir / "GEMINI.md", target_gemini)
             notes.append("Restored GEMINI.md")
+
+        # Restore managed core agents
+        snapshot_agents = snapshot_dir / "agents"
+        if snapshot_agents.exists() and snapshot_agents.is_dir():
+            target_agents = gemini_dir / "config" / "agents"
+            target_agents.mkdir(parents=True, exist_ok=True)
+            for d in snapshot_agents.iterdir():
+                if d.is_dir() and d.name in MANAGED_CORE_AGENTS:
+                    shutil.copytree(d, target_agents / d.name, dirs_exist_ok=True)
+                    notes.append(f"Restored agent {d.name}")
 
         return True, notes
     except Exception as e:
@@ -567,6 +663,7 @@ def uninstall_kernel(
         return True, "Uninstall dry-run preview (no files were modified)", actions
 
     executed_actions = []
+    errors: List[str] = []
 
     # Execute removal of hooks
     if has_hooks and hooks_file.exists():
@@ -579,7 +676,9 @@ def uninstall_kernel(
                 json.dump(h_data, f, indent=2)
             executed_actions.append(f"Cleaned {hooks_file}")
         except Exception as e:
-            executed_actions.append(f"Error cleaning hooks: {e}")
+            err = f"Error cleaning hooks: {e}"
+            executed_actions.append(err)
+            errors.append(err)
 
     # Execute removal of GEMINI.md managed block
     if has_managed_block and gemini_md_file.exists():
@@ -595,32 +694,43 @@ def uninstall_kernel(
                 gemini_md_file.write_text(new_text, encoding="utf-8")
             executed_actions.append(f"Cleaned {gemini_md_file}")
         except Exception as e:
-            executed_actions.append(f"Error cleaning GEMINI.md: {e}")
+            err = f"Error cleaning GEMINI.md: {e}"
+            executed_actions.append(err)
+            errors.append(err)
 
     # Execute removal of managed agents
     for agent_dir in managed_agents_to_remove:
         try:
-            shutil.rmtree(agent_dir, ignore_errors=True)
+            shutil.rmtree(agent_dir)
             executed_actions.append(f"Removed agent {agent_dir.name}")
         except Exception as e:
-            executed_actions.append(f"Error removing agent {agent_dir.name}: {e}")
+            err = f"Error removing agent {agent_dir.name}: {e}"
+            executed_actions.append(err)
+            errors.append(err)
 
     # Remove config directory
     if cfg_dir.exists():
         try:
-            shutil.rmtree(cfg_dir, ignore_errors=True)
+            shutil.rmtree(cfg_dir)
             executed_actions.append(f"Removed {cfg_dir}")
         except Exception as e:
-            executed_actions.append(f"Error removing {cfg_dir}: {e}")
+            err = f"Error removing {cfg_dir}: {e}"
+            executed_actions.append(err)
+            errors.append(err)
 
     # Purge harness if requested
     if workspace and purge_harness:
         ws_harness = Path(workspace).resolve() / ".agent-harness"
         if ws_harness.exists():
             try:
-                shutil.rmtree(ws_harness, ignore_errors=True)
+                shutil.rmtree(ws_harness)
                 executed_actions.append(f"Purged project harness at {ws_harness}")
             except Exception as e:
-                executed_actions.append(f"Error purging harness: {e}")
+                err = f"Error purging harness: {e}"
+                executed_actions.append(err)
+                errors.append(err)
+
+    if errors:
+        return False, f"Uninstall completed with {len(errors)} error(s): {'; '.join(errors)}", executed_actions
 
     return True, "Strict Engineering successfully uninstalled without altering unrelated user configurations", executed_actions

@@ -1,6 +1,6 @@
 {
   "name": "strict-engineering",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Deterministic, Risk-Adaptive and Adversarial Reliability Kernel for Google Antigravity",
   "author": {
     "name": "Strict Engineering Contributors"

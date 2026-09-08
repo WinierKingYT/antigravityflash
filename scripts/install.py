@@ -21,7 +21,7 @@ def main():
     python_exe = sys.executable
 
     print("==========================================================")
-    print(" Installing Antigravity Strict Engineering Kernel V1.2.0")
+    print(" Installing Antigravity Strict Engineering Kernel V1.2.1")
     print("==========================================================")
     print(f"Target Gemini Directory: {gemini_dir}")
     print(f"Using Python Executable: {python_exe}")
@@ -76,7 +76,7 @@ def main():
         hooks_file=hooks_file,
         gemini_md_file=gemini_md_file,
         agents_dir=target_agents,
-        version="1.2.0",
+        version="1.2.1",
         install_source=str(root_dir),
     )
     manifest_file = distribution.save_installation_manifest(manifest, gemini_dir=gemini_dir)
@@ -90,11 +90,11 @@ def main():
     # 7. Observability log
     observability.record_global_event(
         "INSTALL_COMPLETED",
-        {"version": "1.2.0", "modulesCount": copied_count},
+        {"version": "1.2.1", "modulesCount": copied_count},
         gemini_dir=gemini_dir,
     )
 
-    print("\n[SUCCESS] Antigravity Strict Engineering Kernel V1.2.0 successfully installed!")
+    print("\n[SUCCESS] Antigravity Strict Engineering Kernel V1.2.1 successfully installed!")
 
 
 if __name__ == "__main__":

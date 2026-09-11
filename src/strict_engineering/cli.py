@@ -33,7 +33,7 @@ except (ImportError, ValueError):
         import strict_engineering
         __version__ = strict_engineering.__version__
     except Exception:
-        __version__ = "1.2.4"
+        __version__ = "1.2.5"
 
 try:
     from . import kernel

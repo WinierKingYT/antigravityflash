@@ -1,10 +1,10 @@
-# Antigravity Strict Engineering Kernel (V1.2.4)
+# Antigravity Strict Engineering Kernel (V1.2.5)
 
 A deterministic, risk-adaptive, reality-hardened, and adversarial reliability kernel for Google Antigravity on Windows.
 
 [![CI](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml/badge.svg)](https://github.com/WinierKingYT/antigravityflash/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/version-1.2.4-blue.svg)](pyproject.toml)
-[![Tests](https://img.shields.io/badge/tests-573%20passed-brightgreen.svg)](run_tests.py)
+[![Version](https://img.shields.io/badge/version-1.2.5-blue.svg)](pyproject.toml)
+[![Tests](https://img.shields.io/badge/tests-586%20passed-brightgreen.svg)](run_tests.py)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 
 ---
@@ -130,7 +130,7 @@ antigravity-strict-engineering-kernel/
 │   ├── spec-architect/agent.md         # Atomic specification architect
 │   └── test-oracle/agent.md            # Acceptance criteria & contract locking
 ├── src/strict_engineering/             # Canonical Kernel Source Modules
-│   ├── __init__.py                    # Version 1.2.4
+│   ├── __init__.py                    # Version 1.2.5
 │   ├── acceptance_protocol.py         # Test Oracle Given-When-Then acceptance locking
 │   ├── adversarial_verification.py    # Property, fuzz, mutation & fault injection
 │   ├── baseline.py                    # Workspace health baseline & regression delta
@@ -179,7 +179,7 @@ antigravity-strict-engineering-kernel/
 ├── .github/workflows/ci.yml           # GitHub Actions CI workflow
 ├── GEMINI.md                          # Antigravity strict engineering rules
 ├── hooks.json                         # Antigravity lifecycle hooks configuration
-├── pyproject.toml                     # Package specification (v1.2.4)
+├── pyproject.toml                     # Package specification (v1.2.5)
 └── run_tests.py                       # Top-level test runner
 ```
 
@@ -191,9 +191,9 @@ antigravity-strict-engineering-kernel/
 ## ⚡ Installation & Quick Start
 
 > [!IMPORTANT]
-> **Full Self-Update & Historical Version Limitations**:
-> - Automatic live self-update (`strict-engineering update`) provides true, full version parity across the Python package, CLI binary, global Antigravity runtime, manifest, and hooks starting in V1.2.4.
-> - Historical V1.2.3 and earlier installations require one final package bootstrap (`pip install -U antigravity-strict-engineering` or `pip install .`) to enter the full self-updating V1.2.4 release track.
+> **Full Distribution Transaction & Self-Update Lifecycle**:
+> - Automatic live self-update (`strict-engineering update`) provides true transactional version parity across the Python package, CLI binary, global Antigravity runtime, manifest, and hooks starting in V1.2.4 and fully hardened with transactional package rollback in V1.2.5.
+> - Historical V1.2.3 and earlier installations require one final package bootstrap (`pip install -U antigravity-strict-engineering` or `pip install .`) to enter the full self-updating V1.2.5 release track.
 
 ### 1. Install Package & Configure Hooks
 

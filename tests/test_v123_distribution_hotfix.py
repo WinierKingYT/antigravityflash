@@ -19,6 +19,10 @@ from io import BytesIO
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
+root_dir = Path(__file__).resolve().parent.parent
+if str(root_dir / "src") not in sys.path:
+    sys.path.insert(0, str(root_dir / "src"))
+
 import strict_engineering
 from strict_engineering import __version__
 from strict_engineering import distribution

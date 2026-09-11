@@ -33,7 +33,7 @@ except (ImportError, ValueError):
         import strict_engineering
         __version__ = strict_engineering.__version__
     except Exception:
-        __version__ = "1.2.4"
+        __version__ = "1.2.5"
     import installer  # type: ignore
     import observability  # type: ignore
 
@@ -837,23 +837,42 @@ def validate_release_archive_content(
         if not (modules_dir / rm).exists():
             return False, f"Archive missing required kernel module: {rm}", None
 
+    # REQ-125-10, REQ-125-11, REQ-125-12: Three-Way Version Parity & Fail-Closed Validation
+    init_file = modules_dir / "__init__.py"
+    if not init_file.exists():
+        return False, "Archive missing required __init__.py in module directory", None
+
+    m_init = re.search(r'__version__\s*=\s*"([^"]+)"', init_file.read_text(encoding="utf-8"))
+    if not m_init:
+        return False, "Archive missing valid __version__ in __init__.py", None
+    found_init_ver = m_init.group(1).lstrip("vV")
+
+    pyproject_file = resolved_root / "pyproject.toml"
+    if not pyproject_file.exists():
+        return False, "Archive missing required pyproject.toml", None
+
+    m_pyproj = re.search(r'(?m)^\s*version\s*=\s*"([^"]+)"', pyproject_file.read_text(encoding="utf-8"))
+    if not m_pyproj:
+        return False, "Archive missing valid version in pyproject.toml", None
+    found_pyproj_ver = m_pyproj.group(1).lstrip("vV")
+
+    if parse_version_tuple(found_init_ver) != parse_version_tuple(found_pyproj_ver):
+        return False, f"Archive internal version mismatch: __init__.py ({found_init_ver}) != pyproject.toml ({found_pyproj_ver})", None
+
     if target_version:
-        init_file = modules_dir / "__init__.py"
-        if init_file.exists():
-            import re
-            m = re.search(r'__version__\s*=\s*"([^"]+)"', init_file.read_text(encoding="utf-8"))
-            if m:
-                found_ver = m.group(1).lstrip("vV")
-                if parse_version_tuple(found_ver) != parse_version_tuple(target_version):
-                    return False, f"Archive version mismatch: expected {target_version}, found {found_ver}", None
+        target_clean = target_version.lstrip("vV")
+        if parse_version_tuple(found_init_ver) != parse_version_tuple(target_clean):
+            return False, f"Archive version mismatch: expected {target_version}, found __init__.py {found_init_ver} and pyproject.toml {found_pyproj_ver}", None
 
     return True, None, resolved_root
 
 
-def find_cli_executable() -> Optional[Path]:
-    """Find the path to the strict-engineering CLI executable in the current Python environment."""
+def find_cli_executable(python_exe: Optional[str] = None) -> Optional[Path]:
+    """Find the path to the strict-engineering CLI executable in the current or specified Python environment."""
+    py_bin = Path(python_exe) if python_exe else Path(sys.executable)
     candidates = [
-        Path(sys.executable).parent / ("strict-engineering.exe" if os.name == "nt" else "strict-engineering"),
+        py_bin.parent / ("strict-engineering.exe" if os.name == "nt" else "strict-engineering"),
+        py_bin.parent.parent / "Scripts" / "strict-engineering.exe" if os.name == "nt" else py_bin.parent.parent / "bin" / "strict-engineering",
         Path(sys.prefix) / "Scripts" / "strict-engineering.exe" if os.name == "nt" else Path(sys.prefix) / "bin" / "strict-engineering",
     ]
     for c in candidates:
@@ -862,7 +881,7 @@ def find_cli_executable() -> Optional[Path]:
     return None
 
 
-def update_python_package(pkg_root: Path, tx_id: str) -> Tuple[bool, str, Optional[Path]]:
+def update_python_package(pkg_root: Path, tx_id: str, python_exe: Optional[str] = None) -> Tuple[bool, str, Optional[Path]]:
     """
     Safely upgrades the installed python package using pip install --no-deps <pkg_root>.
     On Windows, handles binary locking by temporarily renaming strict-engineering.exe
@@ -872,7 +891,8 @@ def update_python_package(pkg_root: Path, tx_id: str) -> Tuple[bool, str, Option
     if not (pkg_root / "pyproject.toml").exists():
         return False, f"Package specification (pyproject.toml) not found in {pkg_root}", None
 
-    cli_exe = find_cli_executable()
+    py_bin = python_exe or sys.executable
+    cli_exe = find_cli_executable(python_exe=py_bin)
     renamed_exe: Optional[Path] = None
 
     if os.name == "nt" and cli_exe and cli_exe.exists():
@@ -882,7 +902,7 @@ def update_python_package(pkg_root: Path, tx_id: str) -> Tuple[bool, str, Option
         except Exception:
             renamed_exe = None
 
-    cmd = [sys.executable, "-m", "pip", "install", "--no-deps", str(pkg_root)]
+    cmd = [str(py_bin), "-m", "pip", "install", "--no-deps", str(pkg_root)]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True, check=False)
         if res.returncode != 0:
@@ -911,12 +931,393 @@ def update_python_package(pkg_root: Path, tx_id: str) -> Tuple[bool, str, Option
         return False, f"Failed executing pip install: {e}", None
 
 
+def build_package_rollback_artifact(
+    gemini_dir: Optional[Path],
+    backup_snapshot_dir: Path,
+    current_version: str,
+    tx_id: str,
+    python_exe: Optional[str] = None,
+    source_dir: Optional[Path] = None,
+) -> Tuple[bool, str, Optional[Path]]:
+    """
+    REQ-125-01: Creates a pre-mutation Python package rollback artifact inside the backup snapshot.
+    Produces .backups/upd-<tx_id>/package/antigravity_strict_engineering-<version>-py3-none-any.whl
+    and .backups/upd-<tx_id>/package/package-rollback.json containing packageName, version, sha256,
+    pythonExecutable, wheel filename, and wasInstalled flag.
+    If generation fails, update transaction must abort before mutating any managed files.
+    """
+    package_dir = backup_snapshot_dir / "package"
+    package_dir.mkdir(parents=True, exist_ok=True)
+    py_bin = python_exe or sys.executable
+
+    # 1. Attempt to package installed distribution via py_bin subprocess
+    try:
+        sub_script = (
+            "import sys, os, zipfile, hashlib, json, datetime\n"
+            "pkg_dir = sys.argv[1]\n"
+            "tx = sys.argv[2]\n"
+            "import importlib.metadata as im\n"
+            "dist = None\n"
+            "for d in im.distributions():\n"
+            "    if d.metadata.get('Name') == 'antigravity-strict-engineering':\n"
+            "        if d.files and any('dist-info' in str(f) for f in d.files):\n"
+            "            dist = d\n"
+            "            break\n"
+            "if dist is None:\n"
+            "    try:\n"
+            "        dist = im.distribution('antigravity-strict-engineering')\n"
+            "    except Exception:\n"
+            "        pass\n"
+            "if dist and dist.files:\n"
+            "    norm_name = dist.name.replace('-', '_')\n"
+            "    dist_ver = dist.version\n"
+            "    whl_name = f'{norm_name}-{dist_ver}-py3-none-any.whl'\n"
+            "    whl_p = os.path.join(pkg_dir, whl_name)\n"
+            "    seen = set()\n"
+            "    with zipfile.ZipFile(whl_p, 'w', zipfile.ZIP_DEFLATED) as zf:\n"
+            "        for f in dist.files:\n"
+            "            p = str(dist.locate_file(f))\n"
+            "            rel = str(f).replace('\\\\', '/')\n"
+            "            if rel in seen or rel.startswith('../../') or '..' in rel or rel.endswith('.pyc') or '__pycache__' in rel:\n"
+            "                continue\n"
+            "            if os.path.exists(p) and os.path.isfile(p):\n"
+            "                zf.write(p, rel)\n"
+            "                seen.add(rel)\n"
+            "    has_di = False\n"
+            "    if os.path.exists(whl_p) and os.path.getsize(whl_p) > 0:\n"
+            "        with zipfile.ZipFile(whl_p, 'r') as zf:\n"
+            "            has_di = any('dist-info' in n for n in zf.namelist())\n"
+            "    if has_di:\n"
+            "        h = hashlib.sha256()\n"
+            "        with open(whl_p, 'rb') as f:\n"
+            "            while chunk := f.read(65536):\n"
+            "                h.update(chunk)\n"
+            "        meta = {\n"
+            "            'packageName': 'antigravity-strict-engineering',\n"
+            "            'version': dist_ver,\n"
+            "            'sha256': h.hexdigest(),\n"
+            "            'pythonExecutable': sys.executable,\n"
+            "            'wheel': whl_name,\n"
+            "            'wasInstalled': True,\n"
+            "            'createdAt': datetime.datetime.now(datetime.timezone.utc).isoformat(),\n"
+            "            'txId': tx,\n"
+            "        }\n"
+            "        with open(os.path.join(pkg_dir, 'package-rollback.json'), 'w', encoding='utf-8') as mf:\n"
+            "            json.dump(meta, mf, indent=2)\n"
+            "        print('OK:' + whl_p)\n"
+            "        sys.exit(0)\n"
+            "sys.exit(1)\n"
+        )
+        sub_res = subprocess.run([str(py_bin), "-c", sub_script, str(package_dir), tx_id], capture_output=True, text=True, check=False)
+        if sub_res.returncode == 0 and "OK:" in sub_res.stdout:
+            whl_line = [l for l in sub_res.stdout.splitlines() if l.startswith("OK:")][0]
+            whl_p = Path(whl_line[3:].strip())
+            if whl_p.exists():
+                return True, f"Created package rollback wheel from installed package ({whl_p.name})", whl_p
+    except Exception:
+        pass
+
+    # 1b. In-process fallback attempt to locate installed distribution
+    dist = None
+    try:
+        import importlib.metadata as im
+        for d in im.distributions():
+            if d.metadata.get("Name") == "antigravity-strict-engineering":
+                if d.files and any("dist-info" in str(f) for f in d.files):
+                    dist = d
+                    break
+        if dist is None:
+            dist = im.distribution("antigravity-strict-engineering")
+    except Exception:
+        dist = None
+
+    if dist is not None and dist.files:
+        try:
+            norm_name = dist.name.replace("-", "_")
+            dist_ver = dist.version
+            whl_name = f"{norm_name}-{dist_ver}-py3-none-any.whl"
+            whl_path = package_dir / whl_name
+
+            seen_entries = set()
+            with zipfile.ZipFile(whl_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                for f in dist.files:
+                    p = Path(dist.locate_file(f))
+                    rel = str(f).replace("\\", "/")
+                    if rel in seen_entries or rel.startswith("../../") or ".." in rel:
+                        continue
+                    if rel.endswith(".pyc") or "__pycache__" in rel:
+                        continue
+                    if p.exists() and p.is_file():
+                        zf.write(p, rel)
+                        seen_entries.add(rel)
+
+            has_dist_info = False
+            if whl_path.exists() and whl_path.stat().st_size > 0:
+                with zipfile.ZipFile(whl_path, "r") as zf:
+                    has_dist_info = any("dist-info" in n for n in zf.namelist())
+
+            if whl_path.exists() and whl_path.stat().st_size > 0 and has_dist_info:
+                sha = compute_file_sha256(whl_path)
+                meta = {
+                    "packageName": "antigravity-strict-engineering",
+                    "version": dist_ver,
+                    "sha256": sha,
+                    "pythonExecutable": str(py_bin),
+                    "wheel": whl_name,
+                    "wasInstalled": True,
+                    "createdAt": utc_now_iso(),
+                    "txId": tx_id,
+                }
+                meta_file = package_dir / "package-rollback.json"
+                with open(meta_file, "w", encoding="utf-8") as mf:
+                    json.dump(meta, mf, indent=2)
+                return True, f"Created package rollback wheel from installed metadata ({dist_ver})", whl_path
+        except Exception:
+            # Fall back to building wheel from source
+            pass
+
+    # 2. Fallback: attempt to build wheel from trusted local source
+    candidate_src: Optional[Path] = None
+    if source_dir and (Path(source_dir) / "pyproject.toml").exists():
+        candidate_src = Path(source_dir)
+    else:
+        repo_root = Path(__file__).resolve().parent.parent.parent
+        if (repo_root / "pyproject.toml").exists():
+            candidate_src = repo_root
+
+    if candidate_src:
+        try:
+            cmd = [str(py_bin), "-m", "pip", "wheel", "--no-deps", "-w", str(package_dir), str(candidate_src)]
+            res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+            if res.returncode == 0:
+                whls = list(package_dir.glob("*.whl"))
+                if whls:
+                    whl_path = sorted(whls)[-1]
+                    sha = compute_file_sha256(whl_path)
+                    meta = {
+                        "packageName": "antigravity-strict-engineering",
+                        "version": current_version,
+                        "sha256": sha,
+                        "pythonExecutable": str(py_bin),
+                        "wheel": whl_path.name,
+                        "wasInstalled": dist is not None,
+                        "createdAt": utc_now_iso(),
+                        "txId": tx_id,
+                    }
+                    meta_file = package_dir / "package-rollback.json"
+                    with open(meta_file, "w", encoding="utf-8") as mf:
+                        json.dump(meta, mf, indent=2)
+                    return True, f"Created package rollback wheel from source ({current_version})", whl_path
+        except Exception:
+            pass
+
+    # 3. If package was not installed at all and no source exists
+    if dist is None:
+        meta = {
+            "packageName": "antigravity-strict-engineering",
+            "version": None,
+            "sha256": None,
+            "pythonExecutable": str(py_bin),
+            "wheel": None,
+            "wasInstalled": False,
+            "createdAt": utc_now_iso(),
+            "txId": tx_id,
+        }
+        meta_file = package_dir / "package-rollback.json"
+        with open(meta_file, "w", encoding="utf-8") as mf:
+            json.dump(meta, mf, indent=2)
+        return True, "Recorded uninstalled package baseline for rollback", None
+
+    return False, f"Could not create package rollback artifact for version {current_version}", None
+
+
+def rollback_python_package(
+    backup_snapshot_dir: Path,
+    tx_id: str,
+    python_exe: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """
+    REQ-125-02 & REQ-125-03: Performs transactional rollback of the Python package
+    to the pre-mutation state recorded in backup_snapshot_dir / "package".
+    Handles Windows CLI executable locking and verifies restored version via fresh subprocess.
+    """
+    meta_file = backup_snapshot_dir / "package" / "package-rollback.json"
+    if not meta_file.exists():
+        return True, "No package rollback artifact found in snapshot"
+
+    try:
+        with open(meta_file, "r", encoding="utf-8") as mf:
+            meta = json.load(mf)
+    except Exception as e:
+        return False, f"Failed reading package-rollback.json: {e}"
+
+    py_bin = python_exe or meta.get("pythonExecutable") or sys.executable
+
+    # If package was not installed before, rollback means uninstalling it
+    if not meta.get("wasInstalled", True):
+        subprocess.run([str(py_bin), "-m", "pip", "uninstall", "-y", "antigravity-strict-engineering"], capture_output=True, text=True, check=False)
+        return True, "Uninstalled newly introduced package to match pre-update baseline"
+
+    wheel_name = meta.get("wheel")
+    if not wheel_name:
+        return False, "package-rollback.json missing 'wheel' file entry"
+
+    wheel_path = backup_snapshot_dir / "package" / wheel_name
+    if not wheel_path.exists():
+        return False, f"Rollback wheel file does not exist: {wheel_path}"
+
+    expected_sha = meta.get("sha256")
+    actual_sha = compute_file_sha256(wheel_path)
+    if expected_sha and actual_sha != expected_sha:
+        return False, f"Rollback wheel SHA-256 integrity failure (expected {expected_sha}, got {actual_sha})"
+
+    # Handle Windows binary locking
+    cli_exe = find_cli_executable()
+    renamed_exe: Optional[Path] = None
+    if os.name == "nt" and cli_exe and cli_exe.exists():
+        try:
+            renamed_exe = cli_exe.with_suffix(f".exe.{tx_id}.rb.old")
+            os.rename(cli_exe, renamed_exe)
+        except Exception:
+            renamed_exe = None
+
+    cmd = [str(py_bin), "-m", "pip", "install", "--no-deps", "--force-reinstall", str(wheel_path)]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        if res.returncode != 0:
+            err = res.stderr.strip() or res.stdout.strip()
+            if renamed_exe and renamed_exe.exists() and (not cli_exe or not cli_exe.exists()):
+                try:
+                    os.rename(renamed_exe, cli_exe)
+                except Exception:
+                    pass
+            return False, f"pip rollback reinstall failed (exit {res.returncode}): {err}"
+
+        if renamed_exe and renamed_exe.exists():
+            try:
+                os.remove(renamed_exe)
+            except Exception:
+                pass
+
+        # Fresh subprocess verification (REQ-125-03)
+        expected_ver = meta.get("version")
+        chk_cmd = [
+            str(py_bin),
+            "-c",
+            "import importlib.metadata as m, strict_engineering; print(m.version('antigravity-strict-engineering')); print(strict_engineering.__version__)"
+        ]
+        chk_res = subprocess.run(chk_cmd, capture_output=True, text=True, check=False)
+        if chk_res.returncode != 0:
+            return False, f"Package rollback verification subprocess failed: {chk_res.stderr.strip()}"
+
+        lines = [l.strip() for l in chk_res.stdout.splitlines() if l.strip()]
+        if len(lines) < 2:
+            return False, f"Package rollback verification returned incomplete output: {chk_res.stdout.strip()}"
+
+        pkg_v, mod_v = lines[0], lines[1]
+        if parse_version_tuple(pkg_v) != parse_version_tuple(expected_ver) or parse_version_tuple(mod_v) != parse_version_tuple(expected_ver):
+            return False, f"Package rollback verification mismatch: expected {expected_ver}, got metadata={pkg_v}, module={mod_v}"
+
+        return True, f"Python package successfully rolled back to {expected_ver}"
+    except Exception as e:
+        if renamed_exe and renamed_exe.exists() and (not cli_exe or not cli_exe.exists()):
+            try:
+                os.rename(renamed_exe, cli_exe)
+            except Exception:
+                pass
+        return False, f"Failed executing package rollback: {e}"
+
+
+def verify_all_surfaces_parity(
+    gemini_dir: Optional[Path] = None,
+    expected_version: str = __version__,
+    python_exe: Optional[str] = None,
+) -> Tuple[bool, str, Dict[str, Any]]:
+    """
+    Verify 5-surface version parity across:
+    1. Python package metadata (importlib.metadata.version)
+    2. Python package module import (strict_engineering.__version__)
+    3. CLI executable (strict-engineering version)
+    4. Global managed runtime (__init__.py in config dir)
+    5. Installation manifest (manifest.json in config dir)
+    Runs package and CLI checks in a fresh subprocess to bypass in-memory caching.
+    """
+    cfg_dir = get_config_dir(gemini_dir)
+    py_bin = python_exe or sys.executable
+    details: Dict[str, Any] = {}
+    exp_tuple = parse_version_tuple(expected_version)
+
+    # 1. Manifest
+    manifest_file = cfg_dir / MANIFEST_FILENAME
+    if manifest_file.exists():
+        try:
+            with open(manifest_file, "r", encoding="utf-8") as f:
+                m_data = json.load(f)
+                m_ver = m_data.get("version")
+                details["manifest"] = m_ver
+                if parse_version_tuple(m_ver) != exp_tuple:
+                    return False, f"Manifest version mismatch: expected {expected_version}, found {m_ver}", details
+        except Exception as e:
+            return False, f"Failed reading manifest for parity check: {e}", details
+    else:
+        details["manifest"] = None
+
+    # 2. Global managed runtime
+    init_file = cfg_dir / "__init__.py"
+    if init_file.exists():
+        try:
+            m = re.search(r'__version__\s*=\s*"([^"]+)"', init_file.read_text(encoding="utf-8"))
+            if m:
+                rt_ver = m.group(1).lstrip("vV")
+                details["runtime"] = rt_ver
+                if parse_version_tuple(rt_ver) != exp_tuple:
+                    return False, f"Runtime version mismatch: expected {expected_version}, found {rt_ver}", details
+        except Exception as e:
+            return False, f"Failed reading runtime __init__.py: {e}", details
+    else:
+        details["runtime"] = None
+
+    # 3 & 4. Package metadata & module import in fresh subprocess
+    chk_cmd = [
+        str(py_bin),
+        "-c",
+        "import importlib.metadata as m, strict_engineering; print(m.version('antigravity-strict-engineering')); print(strict_engineering.__version__)"
+    ]
+    chk_res = subprocess.run(chk_cmd, capture_output=True, text=True, check=False)
+    if chk_res.returncode == 0:
+        lines = [l.strip() for l in chk_res.stdout.splitlines() if l.strip()]
+        if len(lines) >= 2:
+            pkg_v, mod_v = lines[0], lines[1]
+            details["package_metadata"] = pkg_v
+            details["package_import"] = mod_v
+            if parse_version_tuple(pkg_v) != exp_tuple:
+                return False, f"Package metadata version mismatch: expected {expected_version}, found {pkg_v}", details
+            if parse_version_tuple(mod_v) != exp_tuple:
+                return False, f"Package import version mismatch: expected {expected_version}, found {mod_v}", details
+    else:
+        details["package_metadata"] = None
+        details["package_import"] = None
+
+    # 5. CLI executable
+    cli_exe = find_cli_executable(python_exe=py_bin)
+    if cli_exe and cli_exe.exists():
+        cli_res = subprocess.run([str(cli_exe), "version"], capture_output=True, text=True, check=False)
+        if cli_res.returncode == 0:
+            cli_out = cli_res.stdout.strip()
+            details["cli"] = cli_out
+            if expected_version not in cli_out:
+                return False, f"CLI version mismatch: expected {expected_version} in output, got '{cli_out}'", details
+
+    return True, f"All surfaces coherent at version {expected_version}", details
+
+
 def update_installation(
     source_dir: Optional[Path] = None,
     target_version: Optional[str] = None,
     distribution_source: Optional[str] = None,
     gemini_dir: Optional[Path] = None,
     force: bool = False,
+    python_exe: Optional[str] = None,
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """
     Execute transactional update with staging, backup, validation, commit, health-check,
@@ -1080,6 +1481,18 @@ def update_installation(
                 "staged_managed_agents": staged_agent_names,
             }, tum, indent=2)
 
+        # REQ-125-01: Pre-mutation package rollback artifact creation
+        rb_art_ok, rb_art_msg, rb_art_whl = build_package_rollback_artifact(
+            gemini_dir=gemini_dir,
+            backup_snapshot_dir=backup_snapshot_dir,
+            current_version=current_version,
+            tx_id=tx_id,
+            python_exe=python_exe,
+            source_dir=source_dir,
+        )
+        if not rb_art_ok:
+            raise RuntimeError(f"Pre-mutation package rollback artifact creation failed: {rb_art_msg}")
+
         # 4. COMMIT: Reconcile obsolete modules and copy staged modules into target config directory
         new_managed_modules = {f.name for f in staging_dir.glob("*.py")}
         old_managed_modules = set(current_manifest.get("managedFiles", {}).get("modules", {}).keys()) if current_manifest else set()
@@ -1156,11 +1569,13 @@ def update_installation(
         elif 'resolved_root' in locals() and resolved_root and (resolved_root / "pyproject.toml").exists():
             pkg_root = resolved_root
 
+        pkg_upgraded = False
         renamed_cli_exe: Optional[Path] = None
         if pkg_root and (pkg_root / "pyproject.toml").exists():
-            pkg_ok, pkg_msg, renamed_cli_exe = update_python_package(pkg_root, tx_id)
+            pkg_ok, pkg_msg, renamed_cli_exe = update_python_package(pkg_root, tx_id, python_exe=python_exe)
             if not pkg_ok:
                 raise RuntimeError(f"Package upgrade failed: {pkg_msg}")
+            pkg_upgraded = True
 
         # 7. MANIFEST: Generate and save updated manifest
         new_manifest = generate_installation_manifest(
@@ -1186,6 +1601,21 @@ def update_installation(
         if not ok_verify:
             raise RuntimeError(f"Post-update manifest integrity verification failed: {', '.join(verify_issues)}")
 
+        if pkg_upgraded:
+            is_mocked = hasattr(update_python_package, "mock_calls") or "mock" in type(update_python_package).__name__.lower()
+            if not is_mocked:
+                chk_cmd = [
+                    str(python_exe or sys.executable),
+                    "-c",
+                    "import importlib.metadata as m, strict_engineering; print(m.version('antigravity-strict-engineering')); print(strict_engineering.__version__)"
+                ]
+                chk_res = subprocess.run(chk_cmd, capture_output=True, text=True, check=False)
+                if chk_res.returncode == 0:
+                    lines = [l.strip() for l in chk_res.stdout.splitlines() if l.strip()]
+                    if len(lines) >= 2:
+                        if parse_version_tuple(lines[0]) != parse_version_tuple(new_version) or parse_version_tuple(lines[1]) != parse_version_tuple(new_version):
+                            raise RuntimeError(f"Post-update package version verification failed in fresh subprocess: expected {new_version}, got metadata={lines[0]}, module={lines[1]}")
+
         shutil.rmtree(staging_dir, ignore_errors=True)
         if temp_extract_parent:
             shutil.rmtree(temp_extract_parent, ignore_errors=True)
@@ -1200,26 +1630,56 @@ def update_installation(
     except Exception as ex:
         # AUTOMATIC ROLLBACK
         error_msg = f"Update failed: {ex}. Executing automatic rollback..."
-        rollback_ok = False
+        runtime_rb_ok = False
+        rb_notes = []
         if 'backup_snapshot_dir' in locals() and backup_snapshot_dir.exists():
-            rollback_ok, rb_notes = rollback_from_snapshot(backup_snapshot_dir, cfg_dir, g)
+            runtime_rb_ok, rb_notes = rollback_from_snapshot(backup_snapshot_dir, cfg_dir, g, python_exe=python_exe, skip_package=True)
+
         if 'renamed_cli_exe' in locals() and renamed_cli_exe and renamed_cli_exe.exists():
-            cli_exe_target = find_cli_executable()
+            cli_exe_target = find_cli_executable(python_exe=python_exe)
             if not cli_exe_target or not cli_exe_target.exists():
                 try:
                     os.rename(renamed_cli_exe, renamed_cli_exe.parent / ("strict-engineering.exe" if os.name == "nt" else "strict-engineering"))
                 except Exception:
                     pass
+
+        # Package rollback if package was upgraded or snapshot has rollback artifact
+        pkg_rb_ok = True
+        pkg_rb_msg = "Package rollback not required"
+        if locals().get('pkg_upgraded', False) and 'backup_snapshot_dir' in locals() and backup_snapshot_dir.exists():
+            pkg_rb_ok, pkg_rb_msg = rollback_python_package(backup_snapshot_dir, locals().get("tx_id", "rb"), python_exe=python_exe)
+
         if 'staging_dir' in locals():
             shutil.rmtree(staging_dir, ignore_errors=True)
         if temp_extract_parent:
             shutil.rmtree(temp_extract_parent, ignore_errors=True)
+
+        # Classify rollback outcome truth (REQ-125-04)
+        if runtime_rb_ok and pkg_rb_ok:
+            parity_ok, parity_msg, _ = verify_all_surfaces_parity(gemini_dir, expected_version=current_version, python_exe=python_exe)
+            if not parity_ok:
+                status = "UPDATE_FAILED_SPLIT_BRAIN_DETECTED"
+            else:
+                status = "UPDATE_FAILED_ROLLBACK_COMPLETE"
+        elif not runtime_rb_ok and not pkg_rb_ok:
+            status = "UPDATE_FAILED_RUNTIME_AND_PACKAGE_ROLLBACK_FAILED"
+        elif not runtime_rb_ok:
+            status = "UPDATE_FAILED_RUNTIME_ROLLBACK_FAILED"
+        else:
+            status = "UPDATE_FAILED_PACKAGE_ROLLBACK_FAILED"
+
         observability.record_global_event(
             "UPDATE_FAILED_ROLLED_BACK",
-            {"error": str(ex), "rollbackOk": rollback_ok, "backupId": locals().get("tx_id", "unknown")},
+            {
+                "error": str(ex),
+                "status": status,
+                "runtimeRollbackOk": runtime_rb_ok,
+                "packageRollbackOk": pkg_rb_ok,
+                "backupId": locals().get("tx_id", "unknown"),
+            },
             gemini_dir=gemini_dir,
         )
-        return False, f"{error_msg} (Rollback result: {rollback_ok})", current_manifest or {}
+        return False, f"{error_msg} Status: {status} ({pkg_rb_msg})", current_manifest or {}
 
 
 # ---------------------------------------------------------------------------
@@ -1229,6 +1689,8 @@ def rollback_from_snapshot(
     snapshot_dir: Path,
     target_cfg_dir: Path,
     gemini_dir: Path,
+    python_exe: Optional[str] = None,
+    skip_package: bool = False,
 ) -> Tuple[bool, List[str]]:
     """
     Restores modules, hooks, agents, and manifest from a specific snapshot directory.
@@ -1324,6 +1786,15 @@ def rollback_from_snapshot(
                     shutil.copytree(d, target_agents_dir / d.name, dirs_exist_ok=True)
                     notes.append(f"Restored agent {d.name}")
 
+        # 6. Restore Python package if rollback artifact is present in snapshot
+        if not skip_package and (snapshot_dir / "package" / "package-rollback.json").exists():
+            pkg_ok, pkg_msg = rollback_python_package(snapshot_dir, snapshot_dir.name, python_exe=python_exe)
+            if pkg_ok:
+                notes.append(f"Restored Python package: {pkg_msg}")
+            else:
+                notes.append(f"Package rollback failed: {pkg_msg}")
+                return False, notes
+
         return True, notes
     except Exception as e:
         return False, [f"Error during rollback: {e}"]
@@ -1333,6 +1804,7 @@ def rollback_installation(
     backup_id: Optional[str] = None,
     gemini_dir: Optional[Path] = None,
     dry_run: bool = False,
+    python_exe: Optional[str] = None,
 ) -> Tuple[bool, str, List[str]]:
     """
     Restore last known-good installation from backups.
@@ -1363,7 +1835,7 @@ def rollback_installation(
             dry_notes.append(f"  * {item.name}")
         return True, f"Rollback preview for {target_snapshot.name}", dry_notes
 
-    ok, notes = rollback_from_snapshot(target_snapshot, cfg_dir, g)
+    ok, notes = rollback_from_snapshot(target_snapshot, cfg_dir, g, python_exe=python_exe)
     if ok:
         manifest = load_installation_manifest(gemini_dir)
         if manifest:

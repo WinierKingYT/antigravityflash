@@ -301,40 +301,41 @@ class SelfUpdatePackageParityTestSuite(unittest.TestCase):
         """
         # 01: Initial state coherent
         manifest_init = distribution.load_installation_manifest(self.fake_gemini)
-        self.assertEqual(manifest_init.get("version"), "1.2.4")
+        self.assertEqual(manifest_init.get("version"), __version__)
 
-        # Create staged source for 1.2.4
-        staged_src = Path(self.temp_dir) / "staged_124"
+        # Create staged source for current version
+        staged_src = Path(self.temp_dir) / "staged_curr"
         staged_mod = staged_src / "src" / "strict_engineering"
         staged_mod.mkdir(parents=True, exist_ok=True)
         for f in (root_dir / "src" / "strict_engineering").glob("*.py"):
             shutil.copy2(f, staged_mod / f.name)
-        (staged_src / "pyproject.toml").write_text('[project]\nname="antigravity-strict-engineering"\nversion="1.2.4"\n', encoding="utf-8")
+        (staged_mod / "__init__.py").write_text(f'__version__ = "{__version__}"\n', encoding="utf-8")
+        (staged_src / "pyproject.toml").write_text(f'[project]\nname="antigravity-strict-engineering"\nversion="{__version__}"\n', encoding="utf-8")
 
         # Mock update_python_package to simulate successful package upgrade
         with patch.object(distribution, "update_python_package", return_value=(True, "Package upgraded successfully", None)):
             ok, msg, new_m = distribution.update_installation(
                 source_dir=staged_src,
-                target_version="1.2.4",
+                target_version=__version__,
                 gemini_dir=self.fake_gemini,
                 force=True,
             )
         self.assertTrue(ok, f"Update failed: {msg}")
 
-        # 03: Global runtime is 1.2.4
+        # 03: Global runtime is __version__
         managed_init = self.fake_gemini / "config" / "strict-engineering" / "__init__.py"
-        self.assertIn('"1.2.4"', managed_init.read_text(encoding="utf-8"))
+        self.assertIn(f'"{__version__}"', managed_init.read_text(encoding="utf-8"))
 
-        # 04: Manifest is 1.2.4
+        # 04: Manifest is __version__
         manifest_after = distribution.load_installation_manifest(self.fake_gemini)
-        self.assertEqual(manifest_after.get("version"), "1.2.4")
+        self.assertEqual(manifest_after.get("version"), __version__)
 
-        # 05: Version CLI reports 1.2.4
+        # 05: Version CLI reports __version__
         out_v = io.StringIO()
         with patch("sys.stdout", out_v):
             code_v = cli.main(["version"])
         self.assertEqual(code_v, cli.EXIT_SUCCESS)
-        self.assertIn("1.2.4", out_v.getvalue())
+        self.assertIn(__version__, out_v.getvalue())
 
         # 06: Doctor reports zero version parity failures
         out_doc = io.StringIO()
@@ -355,7 +356,7 @@ class SelfUpdatePackageParityTestSuite(unittest.TestCase):
         # Injected check failure (e.g. malformed metadata or check failed)
         with patch.object(distribution, "check_for_updates", return_value=distribution.UpdateCheckResult(
             status=distribution.UpdateCheckStatus.CHECK_FAILED,
-            current_version="1.2.4",
+            current_version=__version__,
             error="Connection refused",
         )):
             ok, msg, m = distribution.update_installation(
@@ -378,7 +379,7 @@ class SelfUpdatePackageParityTestSuite(unittest.TestCase):
 
         ok, msg, m = distribution.update_installation(
             source_dir=staged_src,
-            target_version="1.2.4",
+            target_version=__version__,
             gemini_dir=self.fake_gemini,
             force=True,
         )
@@ -396,12 +397,12 @@ class SelfUpdatePackageParityTestSuite(unittest.TestCase):
         staged_mod.mkdir(parents=True, exist_ok=True)
         for f in (root_dir / "src" / "strict_engineering").glob("*.py"):
             shutil.copy2(f, staged_mod / f.name)
-        (staged_src / "pyproject.toml").write_text('[project]\nname="antigravity-strict-engineering"\nversion="1.2.4"\n', encoding="utf-8")
+        (staged_src / "pyproject.toml").write_text(f'[project]\nname="antigravity-strict-engineering"\nversion="{__version__}"\n', encoding="utf-8")
 
         with patch.object(distribution, "update_python_package", return_value=(False, "pip permission error", None)):
             ok, msg, m = distribution.update_installation(
                 source_dir=staged_src,
-                target_version="1.2.4",
+                target_version=__version__,
                 gemini_dir=self.fake_gemini,
                 force=True,
             )

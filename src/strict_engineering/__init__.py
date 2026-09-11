@@ -2,7 +2,7 @@
 Strict Engineering Kernel V4 Package
 """
 
-__version__ = "1.2.4"
+__version__ = "1.2.5"
 
 from . import fingerprint
 from . import baseline

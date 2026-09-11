@@ -462,7 +462,7 @@ class V122PluginAndReleaseTruthTestSuite(unittest.TestCase):
 
     def test_version_122_in_all_artifacts(self):
         """TR-REL-01..04: Version matches release version across all source files."""
-        self.assertIn(__version__, ("1.2.2", "1.2.3", "1.2.4"))
+        self.assertIn(__version__, ("1.2.2", "1.2.3", "1.2.4", "1.2.5"))
         pyproject = (REPO_ROOT / "pyproject.toml").read_text(encoding="utf-8")
         self.assertIn(f'version = "{__version__}"', pyproject)
 
